@@ -25,7 +25,10 @@ question **ship it, or change it?** The creator uploads.
 `S` below is this skill's base directory (Claude Code shows it when the skill loads). The siblings
 are `$S/../yt-script`, `$S/../yt-package` and so on. Run `python3 "$S/state.py" where` if unsure.
 
-- Projects: `~/youtube-productions/<date>-<slug>/` (override with `$YT_PRODUCTIONS_DIR`).
+- Projects: `~/youtube-productions/<date>-<slug>/`. This is outside the current working directory,
+  so Claude Code may ask permission to write there - **ask for it and wait**. Never move projects
+  elsewhere, or set `$YT_PRODUCTIONS_DIR`, on your own judgement; only the creator chooses a
+  different location.
 - Python (`state.py`, `qa.py`, the sibling tools) is for deterministic local work only: state,
   scoring, linting, QA. All research, judgement and writing is you, in this Claude Code session.
 - No API keys. Never ask for one, never configure a paid provider, never read `~/yt`.
@@ -54,7 +57,10 @@ stage honestly:
 - `skipped --note "..."` - only when the creator asked to skip it.
 
 Never write a status, score, source, quote, URL or verification result you did not actually produce.
-At a stage marked ✋, show the creator the result, ask, and **stop until they answer**.
+At a stage marked ✋, show the creator the result, ask, and **stop until they answer**. Never
+assume or infer the answer: "continue", "go ahead" or "looks fine" without the actual choice
+(which angle, which hook, which title) is not a choice - ask again, briefly. If you are about to
+write "I went with..." at a checkpoint, stop instead.
 
 ## Stages
 
@@ -63,7 +69,7 @@ At a stage marked ✋, show the creator the result, ask, and **stop until they a
 | `intake` | Ask topic, angle, who it is for, target minutes. Read the voice profile (rules below). Write `brief.md`. | `brief.md` |
 | `tools` | `state.py check-tools <p>`. Then verify web research for real: run one WebSearch and one WebFetch on a page it returns. Record `state.py capability <p> web_research available --note "WebSearch+WebFetch ok: <url>"` or `unavailable` with the error. | `project.json` capabilities |
 | `research` ✋ | `stages/research.md`. If `web_research` is unavailable, mark `needs_input` and ask the creator for sources. Optional niche check with `/yt-viral` only if `niche_research` is available or they give a list. Show the angle; get it approved. | `research/notes.md` |
-| `sources` | `stages/sources.md`. Separate pass: re-open each source, copy the exact supporting quote. | `research/sources.json`, `research/sources.md` |
+| `sources` | `stages/sources.md`. Separate pass: download each page with `curl`, confirm each quote with `python3 "$S/quotecheck.py"`. WebFetch output is a summary, never a verbatim quote. | `research/sources.json`, `research/sources.md` |
 | `outline` | Beats in order, and under each the factual claims it will make, each tagged with candidate source ids. | `outline.md` |
 | `hooks` ✋ | Follow `/yt-script` step 1: five hooks off `$S/../yt-script/hooks.json`, write to `hooks/hooks.txt`, run `python3 "$S/../yt-script/hookscore.py" --json hooks/hooks.txt > hooks/hookscore.json`. Show the top two with scores. Their pick goes in `hooks/chosen.txt`. If they keep a WEAK hook, write their reason in their words to `hooks/override.txt` (QA fails a WEAK hook without one; never write it for them). Hooks make claims too - only ones the sources support. | `hooks/*` |
 | `script` | Follow `/yt-script` steps 2-5 from the chosen hook and `outline.md`: every beat gets `[ON SCREEN: ...]`; runtime at 150 wpm. Mark each factual sentence with its claim id, e.g. `{C4}`. | `script/script.md` (keep `script.vN.md` on rewrites) |
@@ -108,5 +114,6 @@ Silence, "looks good so far", or approval of an earlier checkpoint is not approv
 ## Reporting
 
 End every turn with `state.py status <p>` output trimmed to: what was done this turn, what is
-blocked or unavailable and why, and the next stage. Last line, at a checkpoint or the end:
-**ship it, or change it?**
+blocked or unavailable and why, and the next stage. At a checkpoint, the last line is the one
+decision you need ("Pick an angle: 1, 2 or 3?"). **Ship it, or change it?** is reserved for the
+final upload pack at handoff.

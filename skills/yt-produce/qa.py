@@ -14,10 +14,12 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import state  # noqa: E402
+import quotecheck  # noqa: E402
 
 WPM = 150
 TIERS = {"primary", "scholarly", "secondary", "weak"}
 ACCESS = {"web_fetch", "user_provided", "local_file"}
+QUOTE_CHECK = {"raw_text_match", "summary_only", "user_provided_unchecked"}
 CLAIM_STATUS = {"supported", "partly_supported", "contested", "unsupported", "removed"}
 CHECKERS = {"yt-fact-checker", "general-purpose:yt-fact-checker-instructions"}
 PLACEHOLDER = re.compile(r"\bTODO\b|\bTBD\b|\bFIXME\b|\bXXX\b|\[citation needed\]|\[source\?\]|"
@@ -63,6 +65,16 @@ def gate_sources(pdir):
             probs.append(f"source {tag}: give the url, path or full citation the user provided")
         if s.get("retrieved") and not re.match(r"^\d{4}-\d{2}-\d{2}$", str(s["retrieved"])):
             probs.append(f"source {tag}: retrieved must be YYYY-MM-DD")
+        qc = s.get("quote_check")
+        if qc not in QUOTE_CHECK:
+            probs.append(f"source {tag}: quote_check must be one of {sorted(QUOTE_CHECK)} "
+                         "(a quote that failed its check does not belong in the list)")
+        elif qc == "raw_text_match":
+            page = Path(pdir) / str(s.get("page", ""))
+            if not s.get("page") or not page.is_file():
+                probs.append(f"source {tag}: raw_text_match needs 'page' - the saved download, e.g. research/pages/{tag}.html")
+            elif s.get("quote") and not quotecheck.check(page, s["quote"])[0]:
+                probs.append(f"source {tag}: quote is NOT on the saved page {s['page']} - it is not a raw_text_match")
     return probs
 
 
@@ -254,6 +266,12 @@ def full_run(pdir):
         add("SKIP", "runtime", "no narration or script yet")
 
     srcs, _ = read_json(pdir / "research/sources.json")
+    if isinstance(srcs, list) and srcs:
+        weakq = [f"{s.get('id')} ({s.get('quote_check')})" for s in srcs if s.get("quote_check") != "raw_text_match"]
+        if weakq: add("WARN", "quote checks", "not matched against the raw page text: " + ", ".join(weakq))
+        else: add("PASS", "quote checks", f"all {len(srcs)} quotes matched against saved page text")
+        if not any(s.get("tier") in ("primary", "scholarly") for s in srcs):
+            add("WARN", "source strength", "no primary or scholarly source - everything rests on secondary or weak sources")
     known = {s.get("url") for s in srcs} if isinstance(srcs, list) else set()
     for rel in ("seo/description.md", "publish/upload-pack.md"):
         p = pdir / rel

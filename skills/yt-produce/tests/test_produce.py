@@ -7,7 +7,10 @@ import json, os, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
 
 SKILL = Path(__file__).resolve().parent.parent
-STATE, QA = SKILL / "state.py", SKILL / "qa.py"
+STATE, QA, QC = SKILL / "state.py", SKILL / "qa.py", SKILL / "quotecheck.py"
+PAGE = """<html><head><title>x</title><script>var hidden = "The city fell on 29 May 1453.";</script></head>
+<body><nav>menu</nav><p>After a siege of 53 days, the city fell on 29&nbsp;May 1453.[12] Mehmed&rsquo;s
+cannon &mdash; built by Orban &mdash; had battered the walls.</p></body></html>"""
 SECRET = "ZEBRA-SENTINEL-voice-line"   # must never leak out of the voice file
 
 VOICE_OK = f"""# voice.md
@@ -64,13 +67,15 @@ class Base(unittest.TestCase):
         self.st("capability", p.name, "web_research", "available", "--note", "test: WebSearch+WebFetch ok")
 
     def sources(self, p):
+        self.w(p, "research/pages/S1.html", PAGE)
         self.w(p, "research/sources.json", json.dumps([
             {"id": "S1", "title": "Fall of Constantinople", "publisher": "Example Encyclopedia",
              "url": "https://example.org/fall", "retrieved": "2026-10-16", "accessed_via": "web_fetch",
-             "tier": "scholarly", "quote": "The city fell on 29 May 1453."},
+             "tier": "scholarly", "quote": "the city fell on 29 May 1453.",
+             "quote_check": "raw_text_match", "page": "research/pages/S1.html"},
             {"id": "S2", "title": "Siege notes", "citation": "Creator's own copy of a book, p. 12",
              "retrieved": "2026-10-16", "accessed_via": "user_provided", "tier": "secondary",
-             "quote": "The siege lasted from April to May."}]))
+             "quote": "The siege lasted from April to May.", "quote_check": "user_provided_unchecked"}]))
         self.w(p, "research/sources.md", "S1, S2\n")
 
     def claims(self, p, status="supported", checker="yt-fact-checker"):
@@ -226,6 +231,35 @@ class TestGates(Base):
         r = self.run_py(QA, p.name, "--gate", "factcheck", ok=False); self.assertIn("re-run", r.stdout)
 
 
+class TestQuoteCheck(Base):
+    def test_match_ignores_html_entities_footnotes_and_dashes(self):
+        f = self.w(Path(self.tmp.name), "p.html", PAGE)
+        self.assertIn("MATCH", self.run_py(QC, str(f), "the city fell on 29 May 1453.").stdout)
+        self.run_py(QC, str(f), "Mehmed's cannon - built by Orban - had battered the walls")
+
+    def test_paraphrase_does_not_match(self):
+        f = self.w(Path(self.tmp.name), "p.html", PAGE)
+        r = self.run_py(QC, str(f), "Constantinople was captured on 29 May 1453", ok=False)
+        self.assertIn("NO MATCH", r.stdout)
+
+    def test_script_tag_text_is_not_page_text(self):
+        f = self.w(Path(self.tmp.name), "p.html", PAGE.replace("the city fell on 29&nbsp;May 1453.", "it ended."))
+        self.run_py(QC, str(f), "The city fell on 29 May 1453.", ok=False)
+
+    def test_gate_rejects_claimed_match_not_on_page(self):
+        p = self.new(); self.sources(p)
+        bad = json.loads((p / "research/sources.json").read_text()); bad[0]["quote"] = "The walls were never breached."
+        self.w(p, "research/sources.json", json.dumps(bad))
+        r = self.run_py(QA, p.name, "--gate", "sources", ok=False); self.assertIn("NOT on the saved page", r.stdout)
+
+    def test_gate_requires_quote_check_and_page(self):
+        p = self.new(); self.sources(p)
+        bad = json.loads((p / "research/sources.json").read_text()); del bad[1]["quote_check"]; del bad[0]["page"]
+        self.w(p, "research/sources.json", json.dumps(bad))
+        r = self.run_py(QA, p.name, "--gate", "sources", ok=False)
+        self.assertIn("quote_check", r.stdout); self.assertIn("needs 'page'", r.stdout)
+
+
 class TestFullRun(Base):
     def test_complete_project_passes_and_handoff_needs_explicit_approval(self):
         p = self.new(); self.complete(p)
@@ -267,6 +301,14 @@ class TestFullRun(Base):
         self.w(p, "hooks/override.txt", "Narrated history; I prefer the date-first open.\n")
         r = self.run_py(QA, p.name); self.assertRegex(r.stdout, r"WARN\s+hook score.*kept by the creator")
 
+    def test_unchecked_quotes_and_weak_sources_are_warned(self):
+        p = self.new(); self.complete(p)
+        r = self.run_py(QA, p.name)
+        self.assertRegex(r.stdout, r"WARN\s+quote checks.*S2 \(user_provided_unchecked\)")
+        d = json.loads((p / "research/sources.json").read_text()); d[0]["tier"] = "secondary"
+        self.w(p, "research/sources.json", json.dumps(d))
+        self.assertRegex(self.run_py(QA, p.name).stdout, r"WARN\s+source strength")
+
     def test_runtime_warning(self):
         p = self.new(minutes="10"); self.complete(p)
         r = self.run_py(QA, p.name); self.assertRegex(r.stdout, r"WARN\s+runtime")
@@ -289,8 +331,14 @@ class TestFullRun(Base):
 
 
 class TestSafety(unittest.TestCase):
+    def test_skill_rules_present(self):
+        s = (SKILL / "SKILL.md").read_text()
+        self.assertIn("Never\nassume or infer the answer", s)
+        self.assertIn("reserved for the\nfinal upload pack", s)
+        self.assertIn("ask for it and wait", s)
+
     def test_no_upload_or_network_code(self):
-        src = "".join((SKILL / f).read_text() for f in ("state.py", "qa.py"))
+        src = "".join((SKILL / f).read_text() for f in ("state.py", "qa.py", "quotecheck.py"))
         for bad in ("urllib", "requests", "http.client", "socket", "googleapiclient", "youtube.upload",
                     "ANTHROPIC_API_KEY", "api_key"):
             self.assertNotIn(bad, src, bad)

@@ -7,7 +7,8 @@ Goal: an independent check of every factual claim in `script/script.md` against
 
 Use the Agent tool with `subagent_type: "yt-fact-checker"` and this prompt (fill in the folder):
 
-> Fact-check the project at <project folder>. Read script/script.md, research/sources.json and
+> Fact-check the project at <project folder>. The yt-produce skill directory is <$S>, where
+> quotecheck.py lives. Read script/script.md, research/sources.json and
 > research/sources.md. Write factcheck/claims.json and factcheck/claims.md as your instructions
 > describe. Report the counts by status and every claim that is not `supported`.
 
@@ -28,3 +29,5 @@ yourself in this context.
    and anything removed. Get the script approved, then mark the stage done.
 
 Never edit a claim's status yourself to make the gate pass.
+
+If any source is `summary_only`, tell the creator which claims rest on it.
