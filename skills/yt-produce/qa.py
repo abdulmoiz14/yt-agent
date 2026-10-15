@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+"""qa.py - deterministic checks for a /yt-produce project. No network, no LLM, no uploads.
+
+    python3 qa.py [project]            # full check, writes qa/report.md, exit 1 on any FAIL
+    python3 qa.py [project] --gate STAGE   # just the rules for marking one stage done
+
+It checks structure and consistency. It cannot tell whether a source says what it is claimed to
+say - that is the fact-checker's job, and this script never reports a source as verified.
+Results: PASS, FAIL (blocks handoff), WARN (you should look), SKIP (could not check, and says why).
+"""
+import json, os, re, subprocess, sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import state  # noqa: E402
+
+WPM = 150
+TIERS = {"primary", "scholarly", "secondary", "weak"}
+ACCESS = {"web_fetch", "user_provided", "local_file"}
+CLAIM_STATUS = {"supported", "partly_supported", "contested", "unsupported", "removed"}
+CHECKERS = {"yt-fact-checker", "general-purpose:yt-fact-checker-instructions"}
+PLACEHOLDER = re.compile(r"\bTODO\b|\bTBD\b|\bFIXME\b|\bXXX\b|\[citation needed\]|\[source\?\]|"
+                         r"lorem ipsum|\{\{|\}\}|<insert", re.I)
+TEXT_FILES = ["hooks/chosen.txt", "script/script.md", "narration/narration.md", "seo/description.md",
+              "package/chosen-title.txt", "package/chosen-thumb.txt", "publish/upload-pack.md"]
+TS = re.compile(r"^\s*((?:\d+:)?\d{1,2}:\d{2})\s+\S")
+
+
+def read_json(p):
+    try:
+        return json.loads(Path(p).read_text()), None
+    except FileNotFoundError:
+        return None, f"{Path(p).name} is missing"
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        return None, f"{Path(p).name} is not valid JSON ({e})"
+
+
+def secs(ts):
+    parts = [int(x) for x in ts.split(":")]
+    return sum(v * 60 ** i for i, v in enumerate(reversed(parts)))
+
+
+# ---------------------------------------------------------------- per-stage gates
+
+def gate_sources(pdir):
+    data, err = read_json(Path(pdir) / "research/sources.json")
+    if err: return [err]
+    if not isinstance(data, list) or not data: return ["sources.json must be a non-empty list"]
+    probs, ids = [], set()
+    for i, s in enumerate(data):
+        tag = s.get("id") or f"#{i + 1}"
+        for f in ("id", "title", "retrieved", "accessed_via", "quote", "tier"):
+            if not str(s.get(f, "")).strip(): probs.append(f"source {tag}: missing '{f}'")
+        if s.get("id") in ids: probs.append(f"source {tag}: duplicate id")
+        ids.add(s.get("id"))
+        if s.get("tier") and s["tier"] not in TIERS: probs.append(f"source {tag}: tier must be one of {sorted(TIERS)}")
+        via = s.get("accessed_via")
+        if via and via not in ACCESS: probs.append(f"source {tag}: accessed_via must be one of {sorted(ACCESS)}")
+        if via == "web_fetch" and not re.match(r"^https?://\S+$", str(s.get("url", ""))):
+            probs.append(f"source {tag}: accessed_via web_fetch needs the exact http(s) url that was fetched")
+        if via in ("user_provided", "local_file") and not (s.get("url") or s.get("path") or s.get("citation")):
+            probs.append(f"source {tag}: give the url, path or full citation the user provided")
+        if s.get("retrieved") and not re.match(r"^\d{4}-\d{2}-\d{2}$", str(s["retrieved"])):
+            probs.append(f"source {tag}: retrieved must be YYYY-MM-DD")
+    return probs
+
+
+def gate_factcheck(pdir):
+    pdir = Path(pdir)
+    data, err = read_json(pdir / "factcheck/claims.json")
+    if err: return [err]
+    srcs, serr = read_json(pdir / "research/sources.json")
+    known = {s.get("id") for s in srcs} if isinstance(srcs, list) else set()
+    probs = []
+    if data.get("checked_by") not in CHECKERS:
+        probs.append(f"claims.json checked_by must be one of {sorted(CHECKERS)} - the script's author does not check its own facts")
+    claims = data.get("claims")
+    if not isinstance(claims, list) or not claims: return probs + ["claims.json has no claims"]
+    for c in claims:
+        cid, st = c.get("id", "?"), c.get("status")
+        if st not in CLAIM_STATUS: probs.append(f"claim {cid}: status must be one of {sorted(CLAIM_STATUS)}"); continue
+        if not str(c.get("text", "")).strip(): probs.append(f"claim {cid}: missing text")
+        if st == "unsupported":
+            probs.append(f"claim {cid}: UNSUPPORTED - remove it from the script (mark 'removed') or find a real source")
+        if st in ("supported", "partly_supported", "contested"):
+            cited = c.get("sources") or []
+            if not cited: probs.append(f"claim {cid}: {st} but cites no source")
+            for sid in cited:
+                if sid not in known: probs.append(f"claim {cid}: cites unknown source '{sid}'")
+        if st in ("partly_supported", "contested") and not str(c.get("note", "")).strip():
+            probs.append(f"claim {cid}: {st} needs a note saying how the script hedges it")
+    script = pdir / "script/script.md"
+    if script.exists() and script.stat().st_mtime > (pdir / "factcheck/claims.json").stat().st_mtime + 1:
+        probs.append("script/script.md changed after the fact-check - re-run the fact-check")
+    return probs
+
+
+def gate_hooks(pdir):
+    pdir = Path(pdir)
+    hooks = [l.strip() for l in (pdir / "hooks/hooks.txt").read_text().splitlines() if l.strip()] \
+        if (pdir / "hooks/hooks.txt").exists() else []
+    probs = [] if len(hooks) >= 5 else [f"hooks.txt has {len(hooks)} hooks - /yt-script writes five"]
+    scored, err = read_json(pdir / "hooks/hookscore.json")
+    if err: probs.append(err + " - save the output of hookscore.py --json")
+    elif not (isinstance(scored, list) and scored and all("verdict" in r for r in scored)):
+        probs.append("hookscore.json is not hookscore.py --json output")
+    chosen = (pdir / "hooks/chosen.txt").read_text().strip() if (pdir / "hooks/chosen.txt").exists() else ""
+    if chosen and chosen not in hooks: probs.append("hooks/chosen.txt is not one of the scored hooks")
+    return probs
+
+
+def gate_package(pdir):
+    pdir = Path(pdir)
+    probs = []
+    lint, err = read_json(pdir / "package/title-lint.json")
+    if err: probs.append(err + " - save the output of title.py --json")
+    titles = [l.strip() for l in (pdir / "package/titles.txt").read_text().splitlines() if l.strip()] \
+        if (pdir / "package/titles.txt").exists() else []
+    chosen = (pdir / "package/chosen-title.txt").read_text().strip() if (pdir / "package/chosen-title.txt").exists() else ""
+    if chosen and chosen not in titles: probs.append("chosen-title.txt is not one of the linted titles")
+    return probs
+
+
+def chapter_problems(text):
+    rows = [TS.match(l).group(1) for l in text.splitlines() if TS.match(l)]
+    if len(rows) < 3: return [f"{len(rows)} chapters - YouTube needs at least three"]
+    probs = [] if secs(rows[0]) == 0 else ["first chapter must be 00:00"]
+    for a, b in zip(rows, rows[1:]):
+        if secs(b) - secs(a) < 10: probs.append(f"chapter at {a} is under 10 seconds")
+    return probs
+
+
+def gate_seo(pdir):
+    p = Path(pdir) / "seo/chapters-provisional.txt"
+    return [f"chapters-provisional.txt: {x}" for x in chapter_problems(p.read_text())] if p.exists() else []
+
+
+def gate_qa(pdir):
+    data = state.load(pdir)
+    r = (data.get("qa") or {}).get("result")
+    return [] if r == "PASS" else [f"last qa run was {r or 'never run'} - run qa.py until it passes"]
+
+
+GATES = {"sources": gate_sources, "factcheck": gate_factcheck, "hooks": gate_hooks,
+         "package": gate_package, "seo": gate_seo, "qa": gate_qa}
+
+
+def stage_gate(pdir, sid):
+    fn = GATES.get(sid)
+    return fn(pdir) if fn else []
+
+
+# ---------------------------------------------------------------- full run
+
+def banned_words():
+    """Phrases from the voice profile's 'Words I never use' section. Returns (list, skip_reason)."""
+    vs, vd = state.voice_status()
+    if vs != "available": return None, vd
+    text = state.VOICE.read_text(errors="replace")
+    m = re.search(r"^##\s*words i never use\s*$(.*?)(?=^##\s|\Z)", text, re.I | re.M | re.S)
+    if not m: return None, "voice profile has no 'Words I never use' section"
+    body = m.group(1)
+    quoted = re.findall(r"[\"“']([^\"”']{2,40})[\"”']", body)
+    items = quoted or [x.strip(" -*•\t") for x in re.split(r"[,\n;]", body)]
+    return sorted({i.lower() for i in items if 1 < len(i) <= 40}), None
+
+
+def spoken_words(text):
+    text = re.sub(r"\[[^\]]*\]", " ", text)                       # [ON SCREEN: ...], [PAUSE]
+    text = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith(("#", "|", ">")))
+    return len(re.findall(r"[A-Za-z0-9][A-Za-z0-9'’-]*", text))
+
+
+def run_tool(path, args):
+    if not path.exists(): return None, f"{path.name} not found at {path}"
+    r = subprocess.run([sys.executable, str(path), *args, "--json"], capture_output=True, text=True, timeout=60)
+    if r.returncode != 0: return None, f"{path.name} exited {r.returncode}: {r.stderr.strip()[:200]}"
+    try: return json.loads(r.stdout), None
+    except json.JSONDecodeError: return None, f"{path.name} did not return JSON"
+
+
+def full_run(pdir):
+    pdir = Path(pdir); data = state.load(pdir); R = []
+    add = lambda lvl, check, msg: R.append((lvl, check, msg))
+
+    for sid in state.ORDER:
+        s = data["stages"][sid]; title = state.STAGE[sid]["title"]
+        if state.STAGE[sid]["phase"] == "post" or sid in ("qa", "handoff"): continue
+        if s["status"] == "done":
+            miss = state.outputs_present(pdir, state.STAGE[sid]["outputs"] + s["outputs"])
+            probs = [f"missing {m}" for m in miss] + stage_gate(pdir, sid)
+            add("FAIL" if probs else "PASS", f"stage {sid}", "; ".join(probs) or "outputs present, rules met")
+        elif s["status"] in ("unavailable", "skipped"):
+            add("WARN", f"stage {sid}", f"{s['status']}: {s['notes'][-1] if s['notes'] else ''}")
+        else:
+            lvl = "FAIL" if sid in ("intake", "sources", "script", "factcheck", "package", "seo") else "WARN"
+            add(lvl, f"stage {sid}", f"not done ({s['status']})")
+    for k, v in sorted(data.get("capabilities", {}).items()):
+        if v["status"] != "available" and not k.startswith(("bin:", "py:")):
+            add("WARN", f"capability {k}", f"{v['status']}: {v.get('detail', '')}")
+
+    chosen = pdir / "hooks/chosen.txt"
+    if chosen.exists() and chosen.read_text().strip():
+        out, err = run_tool(state.SIBLING_TOOLS["hookscore"], ["--hook", chosen.read_text().strip()])
+        if err: add("SKIP", "hook score", err)
+        else:
+            r = out[0]; msg = f"{r['verdict']} {r['band']} ({r['formula']}) - heuristic, not a predictor"
+            ov = pdir / "hooks/override.txt"
+            if r["band"] != "WEAK": add("PASS", "hook score", msg)
+            elif ov.exists() and ov.read_text().strip():
+                add("WARN", "hook score", msg + f"; kept by the creator: {ov.read_text().strip()[:160]}")
+            else:
+                add("FAIL", "hook score", msg + "; rewrite it, or record the creator's reason for keeping it in hooks/override.txt")
+    else:
+        add("SKIP", "hook score", "no hooks/chosen.txt yet")
+
+    t, th = pdir / "package/chosen-title.txt", pdir / "package/chosen-thumb.txt"
+    if t.exists() and t.read_text().strip():
+        args = ["--title", t.read_text().strip()] + (["--thumb", th.read_text().strip()] if th.exists() and th.read_text().strip() else [])
+        out, err = run_tool(state.SIBLING_TOOLS["title"], args)
+        if err: add("SKIP", "title lint", err)
+        else:
+            r = out[0]; issues = "; ".join(m for _, m in r["issues"]) or "no issues"
+            add("FAIL" if r["score"] < 50 else "WARN" if r["score"] < 70 else "PASS", "title lint", f"{r['score']}/100 - {issues}")
+    else:
+        add("SKIP", "title lint", "no package/chosen-title.txt yet")
+
+    for rel in TEXT_FILES:
+        p = pdir / rel
+        if p.exists():
+            hits = sorted({m.group(0) for m in PLACEHOLDER.finditer(p.read_text(errors="replace"))})
+            if hits: add("FAIL", "placeholders", f"{rel}: {', '.join(hits)}")
+    if not any(r[1] == "placeholders" for r in R): add("PASS", "placeholders", "none found")
+
+    words, why = banned_words()
+    if words is None: add("SKIP", "banned words", why)
+    else:
+        found = []
+        for rel in TEXT_FILES:
+            p = pdir / rel
+            if p.exists():
+                low = p.read_text(errors="replace").lower()
+                found += [f"{rel}: '{w}'" for w in words if re.search(r"(?<![a-z])" + re.escape(w) + r"(?![a-z])", low)]
+        add("FAIL" if found else "PASS", "banned words", "; ".join(found) or f"none of {len(words)} found")
+
+    src = pdir / "narration/narration.md"
+    src = src if src.exists() else pdir / "script/script.md"
+    if src.exists():
+        n = spoken_words(src.read_text(errors="replace")); mins = n / WPM; tgt = float(data["target_minutes"])
+        off = abs(mins - tgt) / tgt if tgt else 0
+        add("WARN" if off > 0.2 else "PASS", "runtime", f"{n} spoken words = {mins:.1f} min at {WPM} wpm (target {tgt:g}) from {src.relative_to(pdir)}")
+    else:
+        add("SKIP", "runtime", "no narration or script yet")
+
+    srcs, _ = read_json(pdir / "research/sources.json")
+    known = {s.get("url") for s in srcs} if isinstance(srcs, list) else set()
+    for rel in ("seo/description.md", "publish/upload-pack.md"):
+        p = pdir / rel
+        if p.exists():
+            urls = set(re.findall(r"https?://[^\s)\]>\"']+", p.read_text(errors="replace")))
+            stray = sorted(u.rstrip(".,") for u in urls if u.rstrip(".,") not in known)
+            if stray: add("WARN", "links", f"{rel} links not in sources.json (check each is real and intended): {', '.join(stray)}")
+
+    if data.get("approval") and data["stages"]["handoff"]["status"] != "approved":
+        add("FAIL", "approval", "approval recorded but handoff is not in the approved state")
+    return R
+
+
+def write_report(pdir, R):
+    result = "FAIL" if any(r[0] == "FAIL" for r in R) else "PASS"
+    data = state.load(pdir)
+    L = [f"# QA report - {data['topic']}", "", f"**Result: {result}**  ({state.now()})", "",
+         "PASS = met. FAIL = blocks handoff. WARN = look at it. SKIP = could not be checked (reason given).",
+         "This report checks structure and consistency. It does not and cannot confirm that a source "
+         "says what the claims ledger says it does - that is the fact-checker's job.", "",
+         "| result | check | detail |", "| --- | --- | --- |"]
+    L += [f"| {lvl} | {chk} | {msg.replace('|', '/')} |" for lvl, chk, msg in R]
+    rp = Path(pdir) / "qa/report.md"
+    rp.parent.mkdir(exist_ok=True)
+    old = rp.read_text() if rp.exists() else ""
+    notes = old[old.index("## Reviewer notes"):] if "## Reviewer notes" in old else ""
+    rp.write_text("\n".join(L) + "\n" + ("\n" + notes if notes else ""))
+    data["qa"] = {"result": result, "at": state.now(),
+                  "fails": sum(r[0] == "FAIL" for r in R), "warns": sum(r[0] == "WARN" for r in R)}
+    state.save(pdir, data)
+    return result
+
+
+def main():
+    a = sys.argv[1:]
+    gate = a[a.index("--gate") + 1] if "--gate" in a else None
+    a = [x for i, x in enumerate(a) if x != "--gate" and (i == 0 or a[i - 1] != "--gate")]
+    pdir = state.resolve(a[0] if a else None)
+    if gate:
+        probs = stage_gate(pdir, gate)
+        print("\n".join(f"FAIL  {p}" for p in probs) or f"PASS  {gate} gate")
+        sys.exit(1 if probs else 0)
+    R = full_run(pdir)
+    result = write_report(pdir, R)
+    for lvl, chk, msg in R: print(f"{lvl:<5} {chk:<22} {msg}")
+    print(f"\n{result} - report: {pdir / 'qa/report.md'}")
+    sys.exit(1 if result == "FAIL" else 0)
+
+
+if __name__ == "__main__":
+    main()
