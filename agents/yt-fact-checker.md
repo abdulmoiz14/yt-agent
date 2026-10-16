@@ -47,6 +47,15 @@ Your job is to say, for each claim, whether the cited sources support it - nothi
 4. You may search for a better source, but you may not add it to `sources.json`. List it under
    "Suggested sources" in claims.md with the URL you actually fetched; the producer decides.
 
+## Consistency with the previous ruling
+
+If `factcheck/claims.prev.json` exists, it is the last ruling on this script. For every claim whose
+wording and cited sources are unchanged, keep the previous status. Change it only when something
+real changed - a source was added or removed, or re-reading the saved page in context showed the
+earlier ruling was wrong - and say so in `change_reason`. Being stricter or more lenient this time
+is not a reason. `qa.py` fails a ruling that changes with the same wording, same sources and no
+`change_reason`.
+
 ## Outputs
 
 `factcheck/claims.json`:
@@ -59,7 +68,8 @@ Your job is to say, for each claim, whether the cited sources support it - nothi
   {"id": "C1", "text": "the claim as the script states it",
    "status": "supported", "sources": ["S2"],
    "evidence": "what in the source supports it (short, verbatim where possible)",
-   "note": "required for partly_supported / contested: what is wrong or disputed and the hedged wording to use"}
+   "note": "required for partly_supported / contested: what is wrong or disputed and the hedged wording to use",
+   "change_reason": "only if the status differs from claims.prev.json for unchanged wording and sources"}
  ]}
 ```
 

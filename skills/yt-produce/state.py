@@ -25,6 +25,8 @@ HERE = Path(__file__).resolve().parent
 SKILLS = Path(os.environ.get("YT_SKILLS_DIR", HERE.parent)).expanduser()
 ROOT = Path(os.environ.get("YT_PRODUCTIONS_DIR", "~/youtube-productions")).expanduser()
 VOICE = Path(os.environ.get("YT_VOICE_FILE", "~/.claude/youtube/voice.md")).expanduser()
+TTS_PY = Path(os.environ.get("YT_TTS_PYTHON", "~/.local/share/yt-tts/venv/bin/python")).expanduser()
+QWEN_PY = Path(os.environ.get("YT_QWEN_PYTHON", "~/.local/share/qwen-tts/venv/bin/python")).expanduser()
 
 SIBLING_TOOLS = {
     "hookscore": SKILLS / "yt-script" / "hookscore.py",
@@ -47,6 +49,7 @@ STAGES = [
                    "package/chosen-title.txt", "package/chosen-thumb.txt", "package/thumbnail-brief.md"], ["factcheck"], True),
     ("visuals",   "Visual plan",               "pre",  ["visuals/shotlist.md", "visuals/assets.md"],   ["factcheck"],      False),
     ("narration", "Narration prep",            "pre",  ["narration/narration.md", "narration/pronunciation.md"], ["factcheck"], False),
+    ("render",    "Video assembly (render.py)", "pre",  ["render/render.json", "render/captions.srt"], ["narration", "visuals"], True),
     ("seo",       "Description + tags (/yt-seo)", "pre", ["seo/description.md", "seo/tags.txt", "seo/chapters-provisional.txt"], ["package"], False),
     ("qa",        "Quality checks",            "pre",  ["qa/report.md"],                               ["factcheck", "package", "seo"], False),
     ("handoff",   "Upload pack (awaits approval)", "pre", ["publish/upload-pack.md"],                  ["qa"],             True),
@@ -63,6 +66,7 @@ STATUSES = ["pending", "in_progress", "done", "needs_input", "unavailable", "ski
 ICON = {"pending": "[ ]", "in_progress": "[~]", "done": "[x]", "needs_input": "[!] NEEDS INPUT",
         "unavailable": "[-] UNAVAILABLE", "skipped": "[>] skipped",
         "awaiting_approval": "[?] AWAITING YOUR APPROVAL", "approved": "[x] approved by you"}
+OPTIONAL = {"render"}                                # never blocks; run when the creator wants a video assembled
 SETTLED = {"done", "skipped", "approved"}            # satisfies a dependency
 PASSED_OVER = SETTLED | {"unavailable"}              # `next` moves past these
 TEMPLATE_MARKERS = ("Paste the transcript of your best-performing video here",
@@ -94,7 +98,12 @@ def resolve(name=None):
     die(f"'{name}' matches several projects: " + ", ".join(sorted(h.name for h in hits)))
 
 
-def load(pdir): return json.loads((Path(pdir) / "project.json").read_text())
+def load(pdir):
+    data = json.loads((Path(pdir) / "project.json").read_text())
+    for sid in ORDER:          # projects made before a stage existed get it as pending
+        data["stages"].setdefault(sid, {"status": "pending", "updated": data.get("updated"),
+                                        "outputs": [], "commands": [], "notes": []})
+    return data
 
 
 def save(pdir, data):
@@ -119,7 +128,7 @@ def next_stage(data, include_post=False):
     for sid in ORDER:
         if STAGE[sid]["phase"] == "post" and not include_post: continue
         s = st[sid]["status"]
-        if s in PASSED_OVER: continue
+        if s in PASSED_OVER or (sid in OPTIONAL and s == "pending"): continue
         if s == "awaiting_approval":
             return sid, "waiting for your explicit approval - nothing is uploaded or scheduled"
         if s == "needs_input":
@@ -144,6 +153,7 @@ def render(pdir, data):
             s = data["stages"][sid]
             line = f"- {ICON[s['status']]} **{STAGE[sid]['title']}** (`{sid}`)"
             if STAGE[sid]["checkpoint"]: line += " - pauses for you"
+            if sid in OPTIONAL: line += " (optional)"
             L.append(line)
             if s["notes"] and s["status"] not in ("done", "pending"):
                 L.append(f"  - {s['notes'][-1]}")
@@ -241,10 +251,20 @@ def probe_tools():
         ok = importlib.util.find_spec(mod) is not None
         put(f"py:{mod}", ok, "importable" if ok else "not installed")
 
+    for key, py, mod in (("tts:kokoro", TTS_PY, "kokoro"), ("tts:qwen", QWEN_PY, "qwen_tts")):
+        if not py.exists():
+            put(key, False, f"no venv at {py} (see stages/narration.md to install)"); continue
+        try:
+            r = subprocess.run([str(py), "-c", f"import {mod}"], capture_output=True, text=True, timeout=180)
+            put(key, r.returncode == 0, f"{py}" + ("" if r.returncode == 0 else
+                f" exists but 'import {mod}' failed: {(r.stderr.strip().splitlines() or ['?'])[-1][:120]}"))
+        except (OSError, subprocess.TimeoutExpired) as e:
+            put(key, False, f"{py} could not run ({e.__class__.__name__})")
+
     def any_ok(*keys): return [k for k in keys if caps[k]["status"] == "available"]
-    tts = any_ok("bin:piper", "bin:espeak-ng", "bin:espeak")
+    tts = any_ok("tts:qwen", "tts:kokoro", "bin:piper", "bin:espeak-ng", "bin:espeak")
     put("narration_audio", bool(tts), ("local TTS via " + ", ".join(tts)) if tts else
-        "no local TTS (piper/espeak-ng) - narration text is still prepared; record it yourself")
+        "no local TTS (Qwen3-TTS/Kokoro/piper/espeak-ng) - narration text is still prepared; record it yourself")
     stt = any_ok("bin:whisper", "py:whisper", "py:faster_whisper")
     put("transcription", bool(stt) and caps["bin:ffmpeg"]["status"] == "available",
         ("local whisper + ffmpeg" if stt and caps["bin:ffmpeg"]["status"] == "available" else
@@ -349,7 +369,7 @@ def cmd_set(args):
 
 def cmd_where(args):
     print(json.dumps({"skill_dir": str(HERE), "skills_dir": str(SKILLS), "projects_root": str(ROOT),
-                      "voice_file": str(VOICE), "tools": {k: str(v) for k, v in SIBLING_TOOLS.items()},
+                      "voice_file": str(VOICE), "tts_python": str(TTS_PY), "qwen_python": str(QWEN_PY), "tts": str(HERE / "tts.py"), "render": str(HERE / "render.py"), "tools": {k: str(v) for k, v in SIBLING_TOOLS.items()},
                       "qa": str(HERE / "qa.py")}, indent=1))
 
 

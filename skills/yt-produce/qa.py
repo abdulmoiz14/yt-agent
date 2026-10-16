@@ -26,6 +26,7 @@ PLACEHOLDER = re.compile(r"\bTODO\b|\bTBD\b|\bFIXME\b|\bXXX\b|\[citation needed\
                          r"lorem ipsum|\{\{|\}\}|<insert", re.I)
 TEXT_FILES = ["hooks/chosen.txt", "script/script.md", "narration/narration.md", "seo/description.md",
               "package/chosen-title.txt", "package/chosen-thumb.txt", "publish/upload-pack.md"]
+META = re.compile(r"^\s*(spoken )?(word count|words|runtime|duration|scratch audio|voiceover)\b[^:=]{0,40}[:=]", re.I)
 TS = re.compile(r"^\s*((?:\d+:)?\d{1,2}:\d{2})\s+\S")
 
 
@@ -102,6 +103,18 @@ def gate_factcheck(pdir):
                 if sid not in known: probs.append(f"claim {cid}: cites unknown source '{sid}'")
         if st in ("partly_supported", "contested") and not str(c.get("note", "")).strip():
             probs.append(f"claim {cid}: {st} needs a note saying how the script hedges it")
+    prev, _ = read_json(pdir / "factcheck/claims.prev.json")
+    if isinstance(prev, dict):
+        norm = lambda t: re.sub(r"\s+", " ", str(t)).strip().lower()
+        old = {c.get("id"): c for c in prev.get("claims", []) if isinstance(c, dict)}
+        for c in claims:
+            o = old.get(c.get("id"))
+            if not o or o.get("status") == c.get("status"): continue
+            same_text = norm(o.get("text")) == norm(c.get("text"))
+            same_srcs = sorted(o.get("sources") or []) == sorted(c.get("sources") or [])
+            if same_text and same_srcs and not str(c.get("change_reason", "")).strip():
+                probs.append(f"claim {c.get('id')}: ruling changed {o.get('status')} -> {c.get('status')} with the same "
+                             "wording and sources - keep the earlier ruling or give change_reason")
     script = pdir / "script/script.md"
     if script.exists() and script.stat().st_mtime > (pdir / "factcheck/claims.json").stat().st_mtime + 1:
         probs.append("script/script.md changed after the fact-check - re-run the fact-check")
@@ -180,7 +193,7 @@ def banned_words():
 
 def spoken_words(text):
     text = re.sub(r"\[[^\]]*\]", " ", text)                       # [ON SCREEN: ...], [PAUSE]
-    text = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith(("#", "|", ">")))
+    text = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith(("#", "|", ">")) and not META.match(l))
     return len(re.findall(r"[A-Za-z0-9][A-Za-z0-9'’-]*", text))
 
 
@@ -221,7 +234,16 @@ def full_run(pdir):
             ov = pdir / "hooks/override.txt"
             if r["band"] != "WEAK": add("PASS", "hook score", msg)
             elif ov.exists() and ov.read_text().strip():
-                add("WARN", "hook score", msg + f"; kept by the creator: {ov.read_text().strip()[:160]}")
+                txt = ov.read_text()
+                m = re.search(r"^HOOK:\s*(.+)$", txt, re.M)
+                reason = re.search(r"^REASON:\s*(.+)$", txt, re.M)
+                reason = (reason.group(1) if reason else txt).strip()[:160]
+                if not m:
+                    add("WARN", "hook score", msg + f"; kept by the creator (override does not say which wording it covers): {reason}")
+                elif m.group(1).strip() != chosen.read_text().strip():
+                    add("FAIL", "hook score", msg + "; the override was given for different wording - ask the creator whether it still applies")
+                else:
+                    add("WARN", "hook score", msg + f"; kept by the creator: {reason}")
             else:
                 add("FAIL", "hook score", msg + "; rewrite it, or record the creator's reason for keeping it in hooks/override.txt")
     else:
@@ -265,6 +287,29 @@ def full_run(pdir):
     else:
         add("SKIP", "runtime", "no narration or script yet")
 
+    vo, vmeta = pdir / "narration/voiceover.wav", pdir / "narration/voiceover.json"
+    if vo.exists():
+        meta, _ = read_json(vmeta)
+        if (pdir / "narration/narration.md").exists() and (pdir / "narration/narration.md").stat().st_mtime > vo.stat().st_mtime + 1:
+            add("WARN", "voiceover", "narration.md changed after voiceover.wav was made - regenerate it")
+        elif isinstance(meta, dict) and meta.get("scratch"):
+            add("WARN", "voiceover", "voiceover.wav is a SCRATCH track (made with unresolved CHECK pronunciations)")
+        elif isinstance(meta, dict):
+            add("PASS", "voiceover", f"{meta.get('duration_sec')} s, voice {meta.get('voice')}, {meta.get('engine')} - listen to every name before publishing")
+        else:
+            add("WARN", "voiceover", "voiceover.wav has no voiceover.json - was it made by tts.py?")
+    for rj in sorted(pdir.glob("render/**/render.json")):
+        rep, _ = read_json(rj); label = f"render {rj.parent.relative_to(pdir)}"
+        if not isinstance(rep, dict): add("WARN", label, "render.json unreadable"); continue
+        bad = [s["index"] for s in rep.get("segments", []) if s.get("kind") == "image" and not s.get("licence")]
+        src_vo = pdir / "narration" / (f"{rep['variant']}-voiceover.wav" if rep.get("variant") else "voiceover.wav")
+        if bad: add("FAIL", label, f"segments {bad} use an image with no recorded licence")
+        elif src_vo.exists() and src_vo.stat().st_mtime > rj.stat().st_mtime + 1:
+            add("WARN", label, "the voiceover changed after this render - re-render")
+        elif rep.get("draft"):
+            add("WARN", label, f"{rep['output']} is a DRAFT: {rep['placeholders']} placeholder card(s) still need a cleared image")
+        else:
+            add("PASS", label, f"{rep['output']}, every image has a recorded licence - watch it through before upload")
     srcs, _ = read_json(pdir / "research/sources.json")
     if isinstance(srcs, list) and srcs:
         weakq = [f"{s.get('id')} ({s.get('quote_check')})" for s in srcs if s.get("quote_check") != "raw_text_match"]

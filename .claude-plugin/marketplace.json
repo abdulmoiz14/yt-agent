@@ -9,7 +9,7 @@
       "description": "Eleven Claude skills that run a YouTube channel, including a scored hook panel, a title and thumbnail linter, an edit decision list, a retention reader and a virality engine.",
       "source": "./",
       "category": "productivity",
-      "homepage": "https://github.com/Jakeschincariol/youtube-agent-skill"
+      "homepage": "https://github.com/abdulmoiz14/yt-agent"
     }
   ]
 }
