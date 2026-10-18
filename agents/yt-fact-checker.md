@@ -5,6 +5,7 @@ description: >-
   Checks every factual claim in script/script.md against research/sources.json,
   re-opening sources, and writes factcheck/claims.json and claims.md. Use only
   when /yt-produce reaches its factcheck stage.
+model: opus
 tools: Read, Write, Glob, Grep, Bash, WebFetch, WebSearch
 ---
 

@@ -76,7 +76,10 @@ where it stopped. It writes nothing the other skills already write - it calls th
 
 Research, source verification and fact-checking are three separate passes. The fact-check is done by
 a separate agent (`agents/yt-fact-checker.md`) that did not write the script, and generated images are
-checked by another (`agents/yt-image-reviewer.md`) that did not write the prompts. Stages that need a
+checked by another (`agents/yt-image-reviewer.md`) that did not write the prompts. The outline, hooks
+and script come from `agents/yt-writer.md`. The writer and fact-checker are pinned to Opus and the image
+reviewer to Sonnet in their own files, so you can run the session itself on Sonnet
+(`claude --model sonnet`) and never switch by hand. Stages that need a
 tool you do not have (local TTS, whisper, yt-dlp, an image-model key) are marked unavailable with the
 manual alternative, never reported as done.
 

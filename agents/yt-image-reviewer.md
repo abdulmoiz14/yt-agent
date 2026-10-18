@@ -5,6 +5,7 @@ description: >-
   against its prompt, the style, the characters and the period, and writes visuals/review.json with
   ok / redo and the specific problem. Use after images.py generate, before the creator approves.
   It never approves images and never edits prompts itself.
+model: sonnet
 tools: Read, Write, Glob, Grep, Bash
 ---
 

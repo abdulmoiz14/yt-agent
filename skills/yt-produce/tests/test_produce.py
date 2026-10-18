@@ -839,6 +839,15 @@ class TestSafety(unittest.TestCase):
                     "ANTHROPIC_API_KEY", "api_key"):
             self.assertNotIn(bad, src, bad)
 
+    def test_agents_pin_their_models(self):
+        agents = SKILL.parent.parent / "agents"
+        want = {"yt-writer": "opus", "yt-fact-checker": "opus", "yt-image-reviewer": "sonnet"}
+        for name, model in want.items():
+            head = (agents / f"{name}.md").read_text().split("---")[1]
+            self.assertIn(f"\nmodel: {model}\n", head, name)
+            self.assertIn(f"name: {name}", head)
+        self.assertIn("yt-writer", (SKILL / "SKILL.md").read_text())
+
     def test_no_reference_to_yt_project(self):
         for f in SKILL.rglob("*"):
             if f.is_file() and f.suffix in (".md", ".py") and f.name != "test_produce.py":

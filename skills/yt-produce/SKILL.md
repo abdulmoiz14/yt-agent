@@ -78,9 +78,9 @@ write "I went with..." at a checkpoint, stop instead.
 | `niche` (optional) | `stages/niche.md`: `/yt-viral` on 3-6 channels via yt-dlp + `collect.py`. Unavailable without yt-dlp or a list. | `research/niche.md` |
 | `research` ✋ | `stages/research.md`. If `web_research` is unavailable, mark `needs_input` and ask the creator for sources. Optional niche check with `/yt-viral` only if `niche_research` is available or they give a list. Show the angle; get it approved. | `research/notes.md` |
 | `sources` | `stages/sources.md`. Separate pass: download each page with `curl`, confirm each quote with `python3 "$S/quotecheck.py"`. WebFetch output is a summary, never a verbatim quote. | `research/sources.json`, `research/sources.md` |
-| `outline` | Beats in order, and under each the factual claims it will make, each tagged with candidate source ids. | `outline.md` |
-| `hooks` ✋ | Follow `/yt-script` step 1: five hooks off `$S/../yt-script/hooks.json` (narrated history/documentary: `hooks-history.json`), write to `hooks/hooks.txt`, run `python3 "$S/../yt-script/hookscore.py" --json [--set history] hooks/hooks.txt > hooks/hookscore.json`. Show the top two with scores. Their pick goes in `hooks/chosen.txt`. If they keep a WEAK hook, write `hooks/override.txt` as two lines: `HOOK: <the exact chosen hook>` and `REASON: <their words>` (QA fails a WEAK hook without one; never write the reason for them). If the chosen hook's wording changes later (e.g. after the fact-check), re-score it, add it to `hooks/hooks.txt` keeping the old file as `hooks.vN.txt`, and **ask the creator** whether their override still applies; update the HOOK line only after they say yes. Hooks make claims too - only ones the sources support. | `hooks/*` |
-| `script` | Follow `/yt-script` steps 2-5 from the chosen hook and `outline.md`: every beat gets `[ON SCREEN: ...]`; runtime at 150 wpm. Mark each factual sentence with its claim id, e.g. `{C4}`. | `script/script.md` (keep `script.vN.md` on rewrites) |
+| `outline` | The **yt-writer** agent (job `outline`): beats in order, and under each the factual claims it will make, each tagged with candidate source ids. | `outline.md` |
+| `hooks` ✋ | The **yt-writer** agent (job `hooks`) writes and scores them; you show the creator the top two. Rules, as in `/yt-script` step 1: five hooks off `$S/../yt-script/hooks.json` (narrated history/documentary: `hooks-history.json`), write to `hooks/hooks.txt`, run `python3 "$S/../yt-script/hookscore.py" --json [--set history] hooks/hooks.txt > hooks/hookscore.json`. Show the top two with scores. Their pick goes in `hooks/chosen.txt`. If they keep a WEAK hook, write `hooks/override.txt` as two lines: `HOOK: <the exact chosen hook>` and `REASON: <their words>` (QA fails a WEAK hook without one; never write the reason for them). If the chosen hook's wording changes later (e.g. after the fact-check), re-score it, add it to `hooks/hooks.txt` keeping the old file as `hooks.vN.txt`, and **ask the creator** whether their override still applies; update the HOOK line only after they say yes. Hooks make claims too - only ones the sources support. | `hooks/*` |
+| `script` | The **yt-writer** agent (job `script`; after the fact-check, job `rewrite`), following `/yt-script` steps 2-5 from the chosen hook and `outline.md`: every beat gets `[ON SCREEN: ...]`; runtime at 150 wpm. Mark each factual sentence with its claim id, e.g. `{C4}`. | `script/script.md` (keep `script.vN.md` on rewrites) |
 | `factcheck` ✋ | `stages/factcheck.md`: the `yt-fact-checker` agent, not you. Unsupported claims go back into the script; re-run until the gate passes. Show the ledger summary; get the script approved. | `factcheck/claims.json`, `factcheck/claims.md` |
 | `package` ✋ | Follow `/yt-package`: ten titles in `package/titles.txt`, `python3 "$S/../yt-package/title.py" --json package/titles.txt > package/title-lint.json`, re-lint finalists with `--thumb`. Show top three; their pick goes in `chosen-title.txt` / `chosen-thumb.txt`; write `thumbnail-brief.md` (faceless: the illustrated subject, not an expression). Titles may not claim more than the ledger supports. The thumbnail image itself is made in the `images` stage. | `package/*` |
 | `visuals` | `stages/visuals.md`. | `visuals/shotlist.md`, `visuals/assets.md` |
@@ -109,6 +109,14 @@ After publishing (`stages/after-publish.md`, all optional, each waits for the cr
 comments), `audit` (`/yt-audit` on the channel).
 
 
+
+## Models (automatic)
+
+The agents carry their own model, so the creator never has to switch: **yt-writer** and
+**yt-fact-checker** run on Opus (`model: opus` in their files), **yt-image-reviewer** on Sonnet, and
+everything else runs on whatever model this session uses - Sonnet is the economical choice
+(`claude --model sonnet`). Opus work inside an agent still counts against the creator's plan. If an
+agent is not installed (`~/.claude/agents/`), say so and do that stage yourself rather than skipping it.
 
 ## The voice profile
 
