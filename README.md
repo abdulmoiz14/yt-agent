@@ -1,7 +1,8 @@
 # The YouTube agent skill
 
-Twelve Claude skills that run a YouTube channel. Free, MIT, no signup, no API key, nothing to
-connect.
+Thirteen Claude skills that run a YouTube channel. MIT. Twelve of them are free, need no signup and no
+API key. The thirteenth, `/yt-images`, makes scene images with an image model you pay for (your own
+key, your own spending limit) - skip it and everything else still works.
 
 One of them writes your script off 21 hook formulas and scores the hook before you waste a take on
 it. One lints the title and the thumbnail as a single pairing, because writing them separately is
@@ -48,7 +49,7 @@ Then spend ten minutes on [`templates/voice.md`](templates/voice.md). Copy it to
 my voice.md from these". Every skill reads that file. It matters more here than anywhere else,
 because you have to say the words out loud.
 
-## The twelve
+## The thirteen
 
 | command | what it does |
 | --- | --- |
@@ -63,7 +64,8 @@ because you have to say the words out loud.
 | `/yt-seo` | The description, the tags that are worth having, and the three queries this should win. |
 | `/yt-chapters` | Chapters from a transcript, validated against YouTube's own rules so they render. |
 | `/yt-audit` | The whole channel, ending in ONE fix rather than twenty. |
-| `/yt-produce` | One video end to end in its own folder: research, verified sources, an independent fact-check, then the skills above in order. Resumable. Stops at an upload pack that waits for you. |
+| `/yt-images` | Scene images and the thumbnail for a faceless video: prompts from the narration, one style and fixed characters, a spending limit, three test images first, an independent image review, your approval. Default model gpt-image-2-c (OpenLux). Labelled "AI illustration" everywhere. |
+| `/yt-produce` | One video end to end in its own folder: research, verified sources, an independent fact-check, then the skills above in order - voiceover, images and a slideshow render with crossfades, camera moves and title cards. Resumable. Stops at an upload pack that waits for you. |
 
 ## The producer
 
@@ -73,14 +75,21 @@ what is waiting on you, and what could not be done on this machine. `/yt-produce
 where it stopped. It writes nothing the other skills already write - it calls them.
 
 Research, source verification and fact-checking are three separate passes. The fact-check is done by
-a separate agent (`agents/yt-fact-checker.md`) that did not write the script. Stages that need a tool
-you do not have (local TTS, whisper, yt-dlp, image generation) are marked unavailable with the manual
-alternative, never reported as done.
+a separate agent (`agents/yt-fact-checker.md`) that did not write the script, and generated images are
+checked by another (`agents/yt-image-reviewer.md`) that did not write the prompts. Stages that need a
+tool you do not have (local TTS, whisper, yt-dlp, an image-model key) are marked unavailable with the
+manual alternative, never reported as done.
+
+For a faceless, narrated channel: [`templates/voice-narrator.md`](templates/voice-narrator.md) is the
+voice profile shape, `hookscore.py --set history` scores documentary hooks
+([formulas](skills/yt-script/hooks-history.json)), and `render.py` makes the slideshow - slow pans and
+zooms, crossfades, designed date/chapter cards, optional transition sounds and a ducked music bed.
 
 ```bash
 python3 skills/yt-produce/state.py check-tools                 # what this machine can do
 python3 skills/yt-produce/qa.py [project]                      # the pre-handoff checks
 python3 skills/yt-produce/tests/test_produce.py                # tests
+python3 skills/yt-images/tests/test_images.py                  # tests (images, no network)
 ```
 
 It ends at `publish/upload-pack.md` marked NOT UPLOADED and waits for your explicit approval. Even
@@ -123,6 +132,12 @@ its views.
 touches your credentials.
 
 **Tags barely matter** and this pack says so instead of selling you a tag generator.
+
+**AI images are labelled, and they cost money.** `/yt-images` sends prompts to the image service you
+chose with the key you saved in `~/.config/yt-claude/yt-images/openlux.key` (never in a repo, never in
+chat). Every run prints its estimate and refuses to go above the spending limit you gave it. The
+images are illustrations: the video carries an "AI illustration" label, the description says so, and
+QA fails if either is missing.
 
 **Nothing invents a number.** If a skill wants a figure it does not have, it asks you for it or
 writes the line without it.

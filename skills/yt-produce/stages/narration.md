@@ -17,6 +17,9 @@ From the fact-checked `script/script.md`:
 ## `narration/pronunciation.md`
 
 Every name, place and foreign term, with a plain-English respelling (e.g. "Mehmed - MEH-med").
+History channels: Latin and Greek names are where synthetic voices fail most (Gaius = GUY-us,
+Caesar = SEE-zer in English narration, Augustus = aw-GUS-tus, Cannae = KAN-ee). Pick one convention,
+the usual English one, and keep it for the whole channel.
 Only give a pronunciation you are confident of; otherwise write `CHECK` and, if a source gives
 one, cite it by id.
 

@@ -1,7 +1,12 @@
 # Stage: render (video assembly)
 
 Goal: a watchable video built locally with ffmpeg from the voiceover, cleared images and captions.
-No generative video, no cloud renderer, no API key. Needs `narration/voiceover.wav` (tts.py).
+No generative video, no cloud renderer. Needs `narration/voiceover.wav` (tts.py).
+
+**If the images stage ran**, `visuals/plan.json` already exists (`images.py plan`): skip to step 3.
+It holds the approved AI illustrations (licence "AI illustration - creator-generated"), designed
+title cards, and placeholder cards for anything not approved. Public-domain images from step 1 can be
+added to it as extra entries.
 
 ## 1. Gather images - only ones you can clear
 
@@ -24,7 +29,7 @@ Maps and diagrams you cannot find cleared stay as title cards for now - render.p
 
 ## 2. Write `visuals/plan.json`
 
-Line numbers are the order of `narration/voiceover.json` → `lines` (0-based). One entry per visual
+Line numbers come from `python3 "$S/render.py" <project> --list-lines` (0-based; `[PAUSE]` lines count). One entry per visual
 change, in order, first at `start_line` 0:
 
 ```json
@@ -37,12 +42,34 @@ change, in order, first at `start_line` 0:
 Aim for a change every 5-12 seconds. `card` is always required: it is what shows if the image is
 missing or not cleared. A visual must not assert more than the claim it illustrates (`{C7}`).
 
+Designed title cards for dates and chapters - finished parts of the video, not placeholders:
+`{"start_line": 12, "kind": "title", "card": "44 BC", "subtitle": "The Ides of March"}` (add a
+cleared `image` and `licence` to show it blurred behind the text). A title every few minutes
+breaks up a long slideshow the way the reference channels do.
+
+Each image gets a slow camera move, varied automatically; set one with `"motion": "zoom_in"`,
+`zoom_out`, `pan_left`, `pan_right`, `pan_up` or `pan_down` when a picture needs it (pan across a
+wide landscape, zoom in on a face).
+
 ## 3. Render
 
 ```bash
 python3 "$S/render.py" <project> --dry-run          # check the timeline first
-python3 "$S/render.py" <project> [--pitch 1.08]      # 1920x1080, burned captions
+python3 "$S/render.py" <project> [--pitch 1.08]      # 1920x1080, burned captions, crossfades
 ```
+
+Options to ask the creator about - never switch them on silently:
+
+- `--sfx whoosh` (or `click`): a quiet sound on every picture change, made here by ffmpeg (nothing to
+  license). Some viewers like it; on a calm history video a whoosh every few seconds can grate - let
+  them hear a minute of each.
+- `--music track.mp3 --music-licence "YouTube Audio Library, <track>, no attribution required"`: a bed
+  under the voice, ducked while the narrator speaks (`--music-volume 0.12` default). Only a track they
+  have the rights to, and the licence text is required - it goes into `credits.txt`.
+- `--transition cut` for hard cuts instead of crossfades.
+
+AI illustrations make render.py burn a small "AI illustration" label into the corner for the whole
+video; it cannot be turned off (`--label-text` can reword it).
 
 Output: `render/draft.mp4` while any placeholder card remains, `render/video.mp4` once every segment
 is a cleared image. Also `render/captions.srt` (upload it to YouTube too), `render/credits.txt` (put

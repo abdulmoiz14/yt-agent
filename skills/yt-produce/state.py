@@ -11,6 +11,7 @@ Deterministic bookkeeping only. No network, no LLM calls, no API keys, no upload
     python3 state.py capability <project> <name> <available|unavailable> --note "how it was verified"
     python3 state.py set <project> <stage> <status> [--note ...] [--output path ...]
                          [--cmd "command" --exit N] [--user-statement "verbatim approval"]
+    python3 state.py coverage [project]           # which of the 11 original skills this video used
     python3 state.py where                        # paths of this skill, sibling tools, projects root
 
 [project] is the folder name, its slug, or omitted for the most recently updated project.
@@ -33,12 +34,15 @@ SIBLING_TOOLS = {
     "title": SKILLS / "yt-package" / "title.py",
     "chapters": SKILLS / "yt-chapters" / "chapters.py",
     "deadair": SKILLS / "yt-edit" / "deadair.py",
+    "images": SKILLS / "yt-images" / "images.py",
 }
+IMAGE_KEY = Path(os.environ.get("OPENLUX_KEY_FILE", "~/.config/yt-claude/yt-images/openlux.key")).expanduser()
 
 # id, title, phase, default outputs (globs allowed), depends on, pauses for the user
 STAGES = [
     ("intake",    "Intake + voice profile",   "pre",  ["brief.md"],                                   [],                 False),
     ("tools",     "Capability check",          "pre",  [],                                             ["intake"],         False),
+    ("niche",     "Niche check (/yt-viral)",   "pre",  ["research/niche.md"],                          ["tools"],          False),
     ("research",  "Research",                  "pre",  ["research/notes.md"],                          ["tools"],          True),
     ("sources",   "Source verification",       "pre",  ["research/sources.json", "research/sources.md"], ["research"],     False),
     ("outline",   "Outline + claim inventory", "pre",  ["outline.md"],                                 ["sources"],        False),
@@ -49,15 +53,31 @@ STAGES = [
                    "package/chosen-title.txt", "package/chosen-thumb.txt", "package/thumbnail-brief.md"], ["factcheck"], True),
     ("visuals",   "Visual plan",               "pre",  ["visuals/shotlist.md", "visuals/assets.md"],   ["factcheck"],      False),
     ("narration", "Narration prep",            "pre",  ["narration/narration.md", "narration/pronunciation.md"], ["factcheck"], False),
+    ("images",    "Scene images (/yt-images)", "pre",  ["visuals/prompts.json", "visuals/manifest.json", "visuals/review.json",
+                   "visuals/plan.json"], ["narration", "visuals"], True),
     ("render",    "Video assembly (render.py)", "pre",  ["render/render.json", "render/captions.srt"], ["narration", "visuals"], True),
     ("seo",       "Description + tags (/yt-seo)", "pre", ["seo/description.md", "seo/tags.txt", "seo/chapters-provisional.txt"], ["package"], False),
     ("qa",        "Quality checks",            "pre",  ["qa/report.md"],                               ["factcheck", "package", "seo"], False),
     ("handoff",   "Upload pack (awaits approval)", "pre", ["publish/upload-pack.md"],                  ["qa"],             True),
-    ("post_transcript", "Transcript of the recording", "post", ["post/transcript.*"],                  ["factcheck"],      False),
+    ("post_transcript", "Transcript (recording or voiceover)", "post", ["post/transcript.*"],          ["factcheck"],      False),
     ("post_edit",     "Edit decision list (/yt-edit)",  "post", ["post/edl.txt"],                      ["post_transcript"], False),
     ("post_chapters", "Chapters (/yt-chapters)",        "post", ["post/chapters.txt"],                 ["post_transcript"], False),
-    ("post_shorts",   "Shorts (/yt-shorts)",            "post", ["post/shorts.md"],                    ["post_transcript"], False),
+    ("post_shorts",   "Shorts picked (/yt-shorts)",     "post", ["post/shorts.md"],                    ["post_transcript"], False),
+    ("post_short_render", "Shorts rendered (render.py --clip)", "post", ["render/shorts/*/render.json"], ["post_shorts"], True),
+    ("schedule",      "Week plan (/yt-plan)",           "post", ["publish/plan.md"],                   ["handoff"],        True),
+    ("retention",     "Retention read (/yt-retention)", "after", ["post/retention.md"],                ["handoff"],        False),
+    ("comments",      "Comment replies (/yt-comment)",  "after", ["post/comments.md"],                 ["handoff"],        True),
+    ("audit",         "Channel audit (/yt-audit)",      "after", ["post/channel-audit.md"],            ["handoff"],        False),
 ]
+# which of the original skills each stage runs - drives `state.py coverage`
+SKILL_STAGES = {"yt-viral": ["niche"], "yt-script": ["hooks", "script"], "yt-package": ["package"],
+                "yt-seo": ["seo"], "yt-edit": ["post_edit"], "yt-chapters": ["post_chapters"],
+                "yt-shorts": ["post_shorts", "post_short_render"], "yt-plan": ["schedule"],
+                "yt-retention": ["retention"], "yt-comment": ["comments"], "yt-audit": ["audit"]}
+SKILL_NEEDS = {"yt-viral": "yt-dlp or a list of channel videos you collect", "yt-edit": "a transcript (recording or voiceover)",
+               "yt-chapters": "a transcript (recording or voiceover)", "yt-shorts": "a transcript (recording or voiceover)",
+               "yt-plan": "your hours this week and your best upload day", "yt-retention": "the published video's retention CSV from YouTube Studio",
+               "yt-comment": "comments pasted from the published video", "yt-audit": "your channel URL and recent video data"}
 STAGE = {s[0]: dict(zip(("id", "title", "phase", "outputs", "deps", "checkpoint"), s)) for s in STAGES}
 ORDER = [s[0] for s in STAGES]
 
@@ -66,7 +86,7 @@ STATUSES = ["pending", "in_progress", "done", "needs_input", "unavailable", "ski
 ICON = {"pending": "[ ]", "in_progress": "[~]", "done": "[x]", "needs_input": "[!] NEEDS INPUT",
         "unavailable": "[-] UNAVAILABLE", "skipped": "[>] skipped",
         "awaiting_approval": "[?] AWAITING YOUR APPROVAL", "approved": "[x] approved by you"}
-OPTIONAL = {"render"}                                # never blocks; run when the creator wants a video assembled
+OPTIONAL = {"niche", "images", "render", "post_short_render", "schedule", "retention", "comments", "audit"}   # never block the chain
 SETTLED = {"done", "skipped", "approved"}            # satisfies a dependency
 PASSED_OVER = SETTLED | {"unavailable"}              # `next` moves past these
 TEMPLATE_MARKERS = ("Paste the transcript of your best-performing video here",
@@ -126,9 +146,9 @@ def next_stage(data, include_post=False):
     """Return (stage_id or None, reason)."""
     st = data["stages"]
     for sid in ORDER:
-        if STAGE[sid]["phase"] == "post" and not include_post: continue
+        if STAGE[sid]["phase"] != "pre" and not include_post: continue
         s = st[sid]["status"]
-        if s in PASSED_OVER or (sid in OPTIONAL and s == "pending"): continue
+        if s in PASSED_OVER or (sid in OPTIONAL and s in ("pending", "needs_input")): continue
         if s == "awaiting_approval":
             return sid, "waiting for your explicit approval - nothing is uploaded or scheduled"
         if s == "needs_input":
@@ -146,7 +166,7 @@ def render(pdir, data):
          f"Updated: {data['updated']}", ""]
     nid, why = next_stage(data)
     L += [f"**Next:** {STAGE[nid]['title'] + ' - ' + why if nid else why}", "", "## Stages", ""]
-    for phase, head in (("pre", None), ("post", "## After recording")):
+    for phase, head in (("pre", None), ("post", "## After the voiceover or recording"), ("after", "## After publishing")):
         if head: L += ["", head, ""]
         for sid in ORDER:
             if STAGE[sid]["phase"] != phase: continue
@@ -157,6 +177,8 @@ def render(pdir, data):
             L.append(line)
             if s["notes"] and s["status"] not in ("done", "pending"):
                 L.append(f"  - {s['notes'][-1]}")
+    L += ["", "## Skills used", "", "| skill | stages | status |", "| --- | --- | --- |"]
+    L += [f"| `/{k}` | {', '.join(v['stages'])} | {v['status']} |" for k, v in coverage(data).items()]
     caps = data.get("capabilities", {})
     if caps:
         L += ["", "## Capabilities", ""]
@@ -168,6 +190,23 @@ def render(pdir, data):
     if data.get("approval"):
         L.append(f"Approved {data['approval']['approved_at']}: \"{data['approval']['user_statement']}\"")
     return "\n".join(L) + "\n"
+
+
+def coverage(data):
+    """Per original skill: which stages run it and where it stands. Honest: 'used' only when a stage is done."""
+    out = {}
+    for skill, sids in SKILL_STAGES.items():
+        sts = [data["stages"][x]["status"] for x in sids]
+        notes = [data["stages"][x]["notes"][-1] for x in sids if data["stages"][x]["notes"]]
+        if all(x in ("done", "approved") for x in sts): status = "used"
+        elif any(x in ("done", "approved") for x in sts): status = "partly used"
+        elif "in_progress" in sts: status = "in progress"
+        elif "needs_input" in sts: status = "waiting for you: " + (notes[-1] if notes else SKILL_NEEDS.get(skill, ""))
+        elif "unavailable" in sts: status = "unavailable: " + (notes[-1] if notes else "")
+        elif "skipped" in sts: status = "skipped: " + (notes[-1] if notes else "")
+        else: status = "not run yet" + (f" (needs {SKILL_NEEDS[skill]})" if skill in SKILL_NEEDS else "")
+        out[skill] = {"stages": sids, "status": status}
+    return out
 
 
 # ---------------------------------------------------------------- commands
@@ -272,6 +311,17 @@ def probe_tools():
     put("niche_research", caps["bin:yt-dlp"]["status"] == "available",
         "yt-dlp present (public listings only)" if caps["bin:yt-dlp"]["status"] == "available"
         else "no yt-dlp - /yt-viral needs a list you collect by hand, or skip it")
+    # paid image generation (/yt-images): only whether the key FILE is there and private - its contents are never read here
+    if not SIBLING_TOOLS["images"].exists():
+        put("image_generation", False, f"yt-images not found at {SIBLING_TOOLS['images']}")
+    elif not IMAGE_KEY.is_file():
+        put("image_generation", False, f"no OpenLux key file at {IMAGE_KEY} - see ../yt-images/SKILL.md (or make images yourself and import them)")
+    elif IMAGE_KEY.stat().st_mode & 0o077:
+        put("image_generation", False, f"{IMAGE_KEY} is readable by other users - run: chmod 600 {IMAGE_KEY}")
+    else:
+        put("image_generation", caps["bin:ffmpeg"]["status"] == "available",
+            "key file present and private (not read); paid per image - ask the creator for a spending limit"
+            if caps["bin:ffmpeg"]["status"] == "available" else "key file present but ffmpeg is missing")
     vs, vd = voice_status()
     caps["voice_profile"] = {"status": "available" if vs == "available" else "unavailable", "detail": vd, "checked_at": now()}
     return caps, vs, vd
@@ -342,6 +392,9 @@ def cmd_set(args):
         die("only the handoff stage can await or receive approval")
     if status == "awaiting_approval" and data["stages"]["qa"]["status"] != "done":
         die("handoff cannot await approval until qa is done")
+    if status == "awaiting_approval" and s["status"] == "approved":
+        if not note: die("re-opening an approved pack needs --note saying what changed")
+        data["approval"] = None          # the old approval covered the old pack; the creator must approve again
     if status == "approved":
         if s["status"] != "awaiting_approval": die("approval requires the upload pack to be awaiting approval first")
         if not stmt or len(stmt.strip()) < 3:
@@ -367,14 +420,22 @@ def cmd_set(args):
     print(f"{sid}: {status}.  next: {nid or '-'} ({why})")
 
 
+def cmd_coverage(args):
+    pdir = resolve(args[0] if args else None)
+    cov = coverage(load(pdir))
+    for k, v in cov.items(): print(f"/{k:<14} {', '.join(v['stages']):<32} {v['status']}")
+    used = sum(v["status"] == "used" for v in cov.values())
+    print(f"\n{used} of {len(cov)} original skills used on this video")
+
+
 def cmd_where(args):
     print(json.dumps({"skill_dir": str(HERE), "skills_dir": str(SKILLS), "projects_root": str(ROOT),
-                      "voice_file": str(VOICE), "tts_python": str(TTS_PY), "qwen_python": str(QWEN_PY), "tts": str(HERE / "tts.py"), "render": str(HERE / "render.py"), "tools": {k: str(v) for k, v in SIBLING_TOOLS.items()},
+                      "voice_file": str(VOICE), "tts_python": str(TTS_PY), "qwen_python": str(QWEN_PY), "tts": str(HERE / "tts.py"), "render": str(HERE / "render.py"), "images": str(SIBLING_TOOLS["images"]), "tools": {k: str(v) for k, v in SIBLING_TOOLS.items()},
                       "qa": str(HERE / "qa.py")}, indent=1))
 
 
 COMMANDS = {"new": cmd_new, "list": cmd_list, "status": cmd_status, "next": cmd_next,
-            "check-tools": cmd_check_tools, "capability": cmd_capability, "set": cmd_set, "where": cmd_where}
+            "check-tools": cmd_check_tools, "coverage": cmd_coverage, "capability": cmd_capability, "set": cmd_set, "where": cmd_where}
 
 if __name__ == "__main__":
     sys.path.insert(0, str(HERE))

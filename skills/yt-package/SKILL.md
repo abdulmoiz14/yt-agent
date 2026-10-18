@@ -43,6 +43,19 @@ Generate ten titles, run them all through `title.py`, show the user the top thre
 and the specific issue on each. For the winner, write the thumbnail brief: the expression, the
 framing, the three words, and what the background has to do to hold contrast at feed size.
 
+## Faceless channels
+
+No face, so the thumbnail brief describes the **illustrated subject** instead of an expression: one
+figure or object, big, a strong silhouette, the era readable at a glance (a legionary's helmet, a
+burning city), and empty space on one side for the three words. `../yt-images/images.py thumb` makes it -
+the picture with the same model as the video (no text in the image), then the words added by code so
+they are always spelled right:
+
+```bash
+python3 ../yt-images/images.py thumb <project> --text "ROME BURNED" --prompt "Nero's Rome on fire at night, seen from a hill" --max-spend 0.02
+python3 ../yt-images/images.py thumb <project> --text "ROME BURNED" --from-scene 14     # reuse an approved scene, free
+```
+
 ## The gate
 
 Nothing here publishes. This skill writes and you publish. Every output ends in a block the user

@@ -1,10 +1,27 @@
 {
   "name": "youtube-agent",
-  "description": "Twelve Claude skills that run a YouTube channel: scripts off 21 hook formulas with a scored hook, title and thumbnail linted as one pairing, an edit decision list from your transcript, a retention reader that finds the exact moments people leave, a Shorts cutter, chapters, search, comments, the weekly plan, a channel audit, a virality engine that ranks your niche by outlier multiple rather than by channel size, and a producer that runs one video end to end with an independent fact-check and stops before anything is published.",
-  "version": "1.1.0",
-  "author": { "name": "Jake Schincariol", "url": "https://opusjake.ai" },
+  "description": "Thirteen Claude skills that run a YouTube channel: scripts off 21 hook formulas (plus documentary hooks) with a scored hook, title and thumbnail linted as one pairing, an edit decision list, a retention reader, a Shorts cutter, chapters, search, comments, the weekly plan, a channel audit, a virality engine that ranks your niche by outlier multiple, scene images with your own image-model key and spending limit, and a producer that runs one video end to end - independent fact-check, voiceover, slideshow render - and stops before anything is published.",
+  "version": "1.2.0",
+  "author": {
+    "name": "Jake Schincariol",
+    "url": "https://opusjake.ai"
+  },
   "homepage": "https://github.com/abdulmoiz14/yt-agent",
   "repository": "https://github.com/abdulmoiz14/yt-agent",
   "license": "MIT",
-  "keywords": ["youtube", "production", "fact-check", "shorts", "retention", "thumbnails", "titles", "content", "video", "seo"]
+  "keywords": [
+    "content",
+    "documentary",
+    "faceless",
+    "fact-check",
+    "history",
+    "production",
+    "retention",
+    "seo",
+    "shorts",
+    "thumbnails",
+    "titles",
+    "video",
+    "youtube"
+  ]
 }

@@ -17,7 +17,13 @@ Two tools live in this folder and both actually run. Use them. Do not eyeball th
 ```bash
 python3 hookscore.py hooks.txt              # rank your hook options
 python3 hookscore.py --hook "one line"      # score a single one
+python3 hookscore.py --set history hooks.txt   # narrated history / documentary channels
 ```
+
+**Faceless history or documentary channel?** Use [the history formulas](hooks-history.json) and
+`--set history`. The creator formulas reward talking to "you" in the first six words; a narrated
+history hook earns attention with a year, a place and a person instead, and the history set scores
+that (ANCHOR) in place of ADDRESS. Legend stays labelled as legend.
 
 ## Before you write
 

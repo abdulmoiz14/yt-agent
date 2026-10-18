@@ -606,6 +606,42 @@ class TestRender(Base):
         (p / "narration/voiceover.wav").touch()
         self.assertRegex(self.run_py(QA, p.name, ok=None).stdout, r"WARN\s+render render\s+the voiceover changed")
 
+    def test_title_cards_are_finished_not_placeholders_and_ai_images_get_a_label(self):
+        p = self.proj()
+        self.w(p, "visuals/plan.json", json.dumps([
+            {"start_line": 0, "kind": "title", "card": "1453", "subtitle": "The last siege"},
+            {"start_line": 1, "image": "visuals/images/walls.png", "card": "The walls", "motion": "pan_left",
+             "licence": "AI illustration - creator-generated (openlux:gpt-image-2-c)"}]))
+        dry = self.run_py(RENDER, str(p), "--dry-run").stdout
+        self.assertIn('TITLE "1453" / The last siege', dry); self.assertIn("0 placeholder card(s), 1 title card(s)", dry)
+        self.assertIn("label 'AI illustration'", dry); self.assertIn("pan_left", dry)
+        self.run_py(RENDER, str(p), "--size", "640x360", "--sfx", "click")
+        self.assertTrue((p / "render/video.mp4").exists())                                   # a title card is not a draft
+        rep = json.loads((p / "render/render.json").read_text())
+        self.assertEqual((rep["label"], rep["titles"], rep["transition"], rep["sfx"]), ("AI illustration", 1, "fade", "click"))
+        self.assertIn("AI-generated", (p / "render/credits.txt").read_text())
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+                            str(p / "render/video.mp4")], capture_output=True, text=True)
+        self.assertAlmostEqual(float(r.stdout), 6.0, delta=0.15)                             # crossfades keep the timing
+
+    def test_music_needs_a_licence_and_is_credited(self):
+        p = self.proj(); self.plan(p)
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=500:duration=2",
+                        str(p / "track.wav")], check=True)
+        self.assertIn("--music-licence", self.run_py(RENDER, str(p), "--music", "track.wav", "--dry-run", ok=False).stderr)
+        self.run_py(RENDER, str(p), "--size", "640x360", "--no-captions", "--transition", "cut",
+                    "--music", "track.wav", "--music-licence", "made for this test, no rights reserved")
+        rep = json.loads((p / "render/draft.mp4").with_name("render.json").read_text())
+        self.assertEqual((rep["transition"], rep["music"]["file"]), ("cut", "track.wav"))
+        self.assertIn("Music: track.wav - made for this test", (p / "render/credits.txt").read_text())
+
+    def test_bad_motion_and_empty_title_refused(self):
+        p = self.proj()
+        self.w(p, "visuals/plan.json", json.dumps([{"start_line": 0, "image": None, "card": "x", "motion": "spin"}]))
+        self.assertIn("motion must be", self.run_py(RENDER, str(p), "--dry-run", ok=False).stderr)
+        self.w(p, "visuals/plan.json", json.dumps([{"start_line": 0, "kind": "title", "card": ""}]))
+        self.assertIn("needs 'card'", self.run_py(RENDER, str(p), "--dry-run", ok=False).stderr)
+
     def test_bad_plan_is_refused(self):
         p = self.proj()
         self.w(p, "visuals/plan.json", json.dumps([{"start_line": 1, "image": None, "card": "x"}]))
@@ -617,6 +653,179 @@ class TestRender(Base):
         self.assertIn("Video assembly", self.st("status", p.name).stdout)
 
 
+STORY = """> Spoken words: about 200
+The land walls of Constantinople were built in the fifth century under Theodosius.
+For a thousand years they stopped army after army at the edge of the city.
+Moats, towers and a double wall made the city almost impossible to storm.
+[PAUSE]
+In 1452 an engineer called Orban offered his cannons to the emperor first.
+The emperor could not pay him, so Orban went to the young sultan Mehmed instead.
+The sultan paid, and the foundry began casting enormous bronze guns.
+[PAUSE]
+The siege began in April 1453 and lasted fifty three days.
+Ships could not enter the Golden Horn because a great chain blocked the harbour.
+So Mehmed had ships hauled overland, over the hill at Galata, into the Golden Horn.
+[PAUSE]
+On the morning of 29 May the final assault broke through the walls.
+Giustiniani was wounded and carried away, and the defence collapsed.
+By noon the city had fallen, and an empire that had lasted a thousand years was gone.
+"""
+
+
+class TestEverySkill(Base):
+    """The post-voiceover chain on a synthetic voiceover: transcript -> /yt-edit, /yt-chapters, Shorts cut."""
+    def voiced(self):
+        d = Path(self.tmp.name) / "kstub" / "kokoro"; d.mkdir(parents=True)
+        (d / "__init__.py").write_text("class KPipeline:\n    def __init__(self, lang_code): pass\n"
+            "    def __call__(self, text, voice, speed, split_pattern=None):\n"
+            "        yield text, None, [0.05] * int(24000 * 0.33 * len(text.split()))\n")
+        p = self.new(); self.w(p, "narration/narration.md", STORY)
+        r = subprocess.run([sys.executable, str(TTS), str(p / "narration/narration.md")], capture_output=True, text=True,
+                           env={**self.env, "PYTHONPATH": str(d.parent)})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return p, {**self.env, "PYTHONPATH": str(d.parent)}
+
+    def test_voiceover_transcript_feeds_chapters_and_edit(self):
+        p, _ = self.voiced()
+        srt = (p / "narration/voiceover.srt").read_text()
+        self.assertIn("The land walls of Constantinople", srt); self.assertNotIn("Spoken words", srt); self.assertNotIn("[PAUSE]", srt)
+        out = self.run_py(SKILL.parent / "yt-chapters" / "chapters.py", str(p / "narration/voiceover.srt"), "--target", "4").stdout
+        self.assertIn("0:00", out); self.assertIn("4 chapters", out)
+        edl = self.run_py(SKILL.parent / "yt-edit" / "deadair.py", str(p / "narration/voiceover.srt")).stdout
+        self.assertIn("DEAD", edl)                                   # the deliberate [PAUSE]s show as gaps
+
+    @unittest.skipUnless(__import__("shutil").which("ffmpeg"), "ffmpeg not installed")
+    def test_short_cut_from_long_video_with_new_first_line_and_hook_text(self):
+        p, env = self.voiced()
+        self.w(p, "visuals/plan.json", json.dumps([{"start_line": 0, "image": None, "card": "The walls"},
+                                                   {"start_line": 8, "image": None, "card": "The siege"}]))
+        self.w(p, "narration/short-1-intro.md", "Ships cannot sail over a hill. In 1453 they did.\n")
+        r = subprocess.run([sys.executable, str(TTS), str(p / "narration/short-1-intro.md")], capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((p / "narration/short-1-intro.wav").exists())
+        listing = self.run_py(RENDER, str(p), "--list-lines").stdout
+        self.assertRegex(listing, r"\n\s*8\s.*The siege began"); self.assertRegex(listing, r"\n\s*7\s.*\[PAUSE\]")
+        self.run_py(RENDER, str(p), "--clip", "8", "10", "--intro-audio", "narration/short-1-intro.wav",
+                    "--hook-text", "OVER THE HILL", "--name", "short-1")
+        rep = json.loads((p / "render/shorts/short-1/render.json").read_text())
+        self.assertEqual(rep["size"], "1080x1920"); self.assertEqual(rep["clip"]["lines"], [8, 10])
+        self.assertEqual(rep["clip"]["hook_text"], "OVER THE HILL")
+        meta = json.loads((p / "narration/voiceover.json").read_text())
+        want = rep["clip"]["intro_sec"] + meta["lines"][10]["end"] - meta["lines"][8]["start"]
+        self.assertAlmostEqual(rep["duration_sec"], want, delta=0.05)
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+                            str(p / "render/shorts/short-1/draft.mp4")], capture_output=True, text=True)
+        self.assertAlmostEqual(float(r.stdout), want, delta=0.4)
+        cap = (p / "render/shorts/short-1/captions.srt").read_text()
+        self.assertTrue(cap.lstrip().startswith("1\n00:00:00,000")); self.assertIn("Ships cannot sail", cap); self.assertIn("Golden Horn", cap)
+        self.assertIn("lines 8-10", self.run_py(RENDER, str(p), "--clip", "8", "10", "--dry-run").stdout)
+        self.assertIn("within", self.run_py(RENDER, str(p), "--clip", "6", "99", "--dry-run", ok=False).stderr)
+
+
+class TestCoverageAndFlow(Base):
+    def test_coverage_lists_all_eleven_skills_honestly(self):
+        p = self.new(); out = self.st("coverage", p.name).stdout
+        for sk in ("yt-viral", "yt-script", "yt-package", "yt-seo", "yt-edit", "yt-chapters", "yt-shorts",
+                   "yt-plan", "yt-retention", "yt-comment", "yt-audit"):
+            self.assertIn("/" + sk, out)
+        self.assertIn("0 of 11 original skills used", out)
+        self.assertIn("retention CSV", out)
+        self.assertIn("## Skills used", (p / "STATUS.md").read_text())
+
+    def test_coverage_reflects_stage_status(self):
+        p = self.new()
+        self.st("set", p.name, "retention", "needs_input", "--note", "export the retention CSV after publishing")
+        self.st("set", p.name, "niche", "unavailable", "--note", "no yt-dlp")
+        out = self.st("coverage", p.name).stdout
+        self.assertRegex(out, r"/yt-retention.*waiting for you: export the retention CSV")
+        self.assertRegex(out, r"/yt-viral.*unavailable: no yt-dlp")
+
+    def test_optional_stages_waiting_for_creator_never_block(self):
+        p = self.new(); self.w(p, "brief.md", "x"); self.voice.write_text(VOICE_OK)
+        self.st("set", p.name, "intake", "done")
+        self.st("set", p.name, "niche", "needs_input", "--note", "paste channel list")
+        self.assertEqual(json.loads(self.st("next", p.name).stdout)["stage"], "tools")
+
+    def test_reopening_an_approved_pack_clears_approval(self):
+        p = self.new(); self.complete(p); self.run_py(QA, p.name); self.st("set", p.name, "qa", "done")
+        self.w(p, "publish/upload-pack.md", "NOT UPLOADED.\n"); self.st("set", p.name, "handoff", "awaiting_approval")
+        self.st("set", p.name, "handoff", "approved", "--user-statement", "Approved")
+        self.st("set", p.name, "handoff", "awaiting_approval", ok=False)            # needs a note
+        self.st("set", p.name, "handoff", "awaiting_approval", "--note", "chapters updated from the real audio")
+        d = self.data(p); self.assertIsNone(d["approval"]); self.assertEqual(d["stages"]["handoff"]["status"], "awaiting_approval")
+
+    def test_collect_converts_ytdlp_listing_and_drops_unknown_views(self):
+        lst = {"channel": "Hist", "entries": [{"id": f"v{i}", "title": f"Video {i}", "view_count": 1000 * (i + 1), "duration": 600}
+                                              for i in range(4)] + [{"id": "x", "title": "No views"}]}
+        f = Path(self.tmp.name) / "hist.json"; f.write_text(json.dumps(lst)); out = Path(self.tmp.name) / "collected.json"
+        r = self.run_py(SKILL / "collect.py", str(f), "-o", str(out))
+        self.assertIn("4 videos, 1 without a view count dropped", r.stdout)
+        rows = json.loads(out.read_text()); self.assertEqual(len(rows), 4)
+        self.assertEqual(rows[0]["url"], "https://www.youtube.com/watch?v=v0")
+        self.run_py(SKILL.parent / "yt-viral" / "swipe.py", str(out), "--min", "1.0")
+
+
+class TestImagesStage(Base):
+    LIC = "AI illustration - creator-generated (openlux:gpt-image-2-c)"
+
+    def files(self, p, approved=True, reviewed=True, licence=None):
+        self.w(p, "visuals/prompts.json", json.dumps({"style": "x", "scenes": [{"scene": 1, "start_line": 0, "prompt": "a forum"}]}))
+        rec = {"scene": 1, "file": "scene_001.png", "status": "approved" if approved else "done", "provider": "openlux:gpt-image-2-c",
+               "prompt": "x. a forum", **({"approval_statement": "these look right"} if approved else {})}
+        self.w(p, "visuals/manifest.json", json.dumps({"version": 1, "scenes": {"1": rec}}))
+        self.w(p, "visuals/images/scene_001.png", "png")
+        self.w(p, "visuals/review.json", json.dumps({"checked_by": "yt-image-reviewer", "scenes":
+            [{"scene": 1, "file": "scene_001.png", "verdict": "ok", "problems": []}] if reviewed else []}))
+        self.w(p, "visuals/plan.json", json.dumps([{"start_line": 0, "image": "visuals/images/scene_001.png",
+                                                     "licence": licence or self.LIC, "card": "Forum"}]))
+
+    def test_images_stage_is_optional_and_ordered_before_render(self):
+        order = json.loads(self.run_py(STATE, "where").stdout)
+        self.assertTrue(order["images"].endswith("yt-images/images.py"))
+        p = self.new(); self.assertIn("Scene images (/yt-images)", (p / "STATUS.md").read_text())
+        self.assertIn("(optional)", [l for l in (p / "STATUS.md").read_text().splitlines() if "Scene images" in l][0])
+
+    def test_gate_needs_creator_approval_and_independent_review(self):
+        p = self.new(); self.files(p, approved=False)
+        r = self.st("set", p.name, "images", "done", ok=False).stderr
+        self.assertIn("not approved by the creator", r)
+        self.files(p, reviewed=False)
+        self.assertIn("not reviewed by yt-image-reviewer", self.st("set", p.name, "images", "done", ok=False).stderr)
+        self.files(p, licence="Public domain")
+        self.assertIn("does not say 'AI illustration'", self.st("set", p.name, "images", "done", ok=False).stderr)
+        self.files(p); self.st("set", p.name, "images", "done")
+
+    def test_ai_images_need_a_description_disclosure(self):
+        p = self.new(); self.complete(p)
+        self.w(p, "render/render.json", json.dumps({"output": "render/video.mp4", "draft": False, "label": "AI illustration",
+               "segments": [{"index": 0, "kind": "image", "licence": self.LIC}]}))
+        self.assertRegex(self.run_py(QA, p.name, ok=False).stdout, r"FAIL\s+AI disclosure\s+the video uses AI illustrations")
+        self.w(p, "seo/description.md", "Why the walls fell.\nIllustrations in this video are AI-generated and are not historical images.\n")
+        self.assertRegex(self.run_py(QA, p.name, ok=None).stdout, r"PASS\s+AI disclosure")
+        rep = json.loads((p / "render/render.json").read_text()); rep["label"] = None
+        self.w(p, "render/render.json", json.dumps(rep))
+        self.assertRegex(self.run_py(QA, p.name, ok=False).stdout, r"FAIL\s+AI disclosure\s+render uses AI images but has no on-screen label")
+
+    def test_image_capability_checks_key_file_without_reading_it(self):
+        key = Path(self.tmp.name) / "openlux.key"; key.write_text("sk-NEVER-PRINT-ME"); os.chmod(key, 0o644)
+        env = {**self.env, "OPENLUX_KEY_FILE": str(key)}
+        out = subprocess.run([sys.executable, str(STATE), "check-tools"], capture_output=True, text=True, env=env).stdout
+        self.assertRegex(out, r"image_generation\s+unavailable.*chmod 600"); self.assertNotIn("NEVER-PRINT", out)
+        os.chmod(key, 0o600)
+        out = subprocess.run([sys.executable, str(STATE), "check-tools"], capture_output=True, text=True, env=env).stdout
+        self.assertNotIn("NEVER-PRINT", out); self.assertIn("image_generation", out)
+
+    def test_history_hooks_are_rescored_with_their_own_set(self):
+        p = self.new(); self.complete(p)
+        hook = "In January 49 BC, Julius Caesar led one legion across a small river. Why did it start a civil war?"
+        self.w(p, "hooks/hooks.txt", HOOKS + hook + "\n")
+        out = self.run_py(SKILL.parent / "yt-script" / "hookscore.py", "--json", "--set", "history", str(p / "hooks/hooks.txt")).stdout
+        self.assertTrue(all(r["set"] == "history" for r in json.loads(out)))
+        self.w(p, "hooks/hookscore.json", out); self.w(p, "hooks/chosen.txt", hook + "\n")
+        res = self.run_py(QA, p.name, ok=None).stdout
+        self.assertRegex(res, r"(PASS|WARN|FAIL)\s+hook score\s+\d+ (STRONG|WORKABLE|WEAK) \((The Turning Point|The Cold Open|The Question)\)")
+
+
 class TestSafety(unittest.TestCase):
     def test_skill_rules_present(self):
         s = (SKILL / "SKILL.md").read_text()
@@ -625,7 +834,7 @@ class TestSafety(unittest.TestCase):
         self.assertIn("ask for it and wait", s)
 
     def test_no_upload_or_network_code(self):
-        src = "".join((SKILL / f).read_text() for f in ("state.py", "qa.py", "quotecheck.py", "tts.py", "render.py"))
+        src = "".join((SKILL / f).read_text() for f in ("state.py", "qa.py", "quotecheck.py", "tts.py", "render.py", "collect.py"))
         for bad in ("urllib", "requests", "http.client", "socket", "googleapiclient", "youtube.upload",
                     "ANTHROPIC_API_KEY", "api_key"):
             self.assertNotIn(bad, src, bad)

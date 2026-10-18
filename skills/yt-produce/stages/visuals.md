@@ -1,7 +1,8 @@
 # Stage: visuals
 
-Goal: a plan the creator (or an editor) can execute. Planning only - no image generation is
-available in this version, and none is pretended.
+Goal: a plan the creator (or an editor) can execute. This stage plans; the pictures are made later,
+in the `images` stage (`/yt-images`, paid, with the creator's spending limit and approval) once the
+voiceover gives exact line timings - or found as cleared public-domain images (`stages/render.md`).
 
 ## `visuals/shotlist.md`
 
@@ -9,7 +10,8 @@ A table built from the `[ON SCREEN: ...]` marks in `script/script.md`, one row p
 
 | beat | time (at 150 wpm) | spoken line (first words) | visual | type | source / how to get it | status |
 
-`type`: talking head, map, diagram, archival image, text on screen, B-roll, reconstruction.
+`type`: talking head, map, diagram, archival image, text on screen, B-roll, reconstruction,
+AI illustration, title card (a date or chapter: `"kind": "title"` in the images stage, drawn by render.py).
 `status`: `have`, `find`, `make`, `need decision`.
 
 Flag any beat longer than ~20 seconds with no visual change.
@@ -29,5 +31,6 @@ visual cannot assert more than the ledger supports. Do not trace or reproduce co
 
 Thumbnail: link to `package/thumbnail-brief.md`; do not redesign it here.
 
-Unavailable in this version (say so in the file): image generation, stock-library search with
+AI illustrations are listed here as `AI illustration - made in the images stage`; they are never
+presented as archival. Unavailable in this version (say so in the file): stock-library search with
 licensing, automatic asset download.

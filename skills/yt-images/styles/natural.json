@@ -1,0 +1,10 @@
+{
+ "style": "Painterly historical illustration in the style of a documentary storyboard, warm golden-hour light, natural colours, soft brushwork, believable period architecture, clothing and landscape",
+ "negative": "text, letters, words, captions, watermark, logo, signature, extra limbs, deformed hands, modern objects, anachronisms, photograph, cartoon",
+ "size": [
+  1920,
+  1080
+ ],
+ "characters": {},
+ "scenes": []
+}

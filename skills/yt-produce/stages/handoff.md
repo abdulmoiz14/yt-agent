@@ -12,7 +12,8 @@ Start with this banner, verbatim:
 
 Then, each in a fenced block they can copy:
 
-1. Title (`package/chosen-title.txt`) and thumbnail text + brief.
+1. Title (`package/chosen-title.txt`) and thumbnail text + brief, and `package/thumbnail.png` if it was made.
+   The file to upload: `render/video.mp4` (say if it is still `draft.mp4`), plus `render/captions.srt`.
 2. Description (`seo/description.md`), with the chapters marked provisional until the post-recording
    chapters exist.
 3. Tags (`seo/tags.txt`).
@@ -22,6 +23,10 @@ Then, each in a fenced block they can copy:
 Then, outside the blocks:
 
 - QA result and every WARN/SKIP from `qa/report.md`.
+- If the video uses AI illustrations: it is labelled on screen and in the description. YouTube Studio
+  also asks about "altered or synthetic content" when you upload - it is meant for realistic footage of
+  real people, places or events. Stylised illustrations usually do not need it, but realistic-looking
+  scenes might; tell the creator it is their call and point them to YouTube's help page on it.
 - Stages that were `unavailable` or `skipped`, and what that means for this video.
 - Post-recording stages still to do (`state.py next <p> --post`).
 

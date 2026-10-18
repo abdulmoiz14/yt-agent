@@ -8,6 +8,10 @@ that leaks at the dead one, and averaging hides that.
     python3 hookscore.py hooks.txt            # one hook per line, ranked
     python3 hookscore.py --hook "one line"    # score a single hook
     python3 hookscore.py --json hooks.txt     # machine-readable
+    python3 hookscore.py --set history hooks.txt   # narrated history/documentary hooks (hooks-history.json)
+
+--set history swaps the creator formulas for documentary ones and the ADDRESS property for ANCHOR:
+a history hook earns attention with a time, a place and a person in its first words, not with "you".
 
 WHAT THIS CAN AND CANNOT TELL YOU. Measured against 74 real short-form hooks (first 15 seconds of
 auto-captions, top-8 and bottom-8 by views across five channels): it separates deliberately bad
@@ -17,6 +21,7 @@ all. Treat a low score as a reason to look again, never a high score as a promis
 import json, os, re, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+SETS = {"creator": "hooks.json", "history": "hooks-history.json"}
 FORMULAS = json.load(open(os.path.join(HERE, "hooks.json")))["hooks"]
 
 FILLER = {"basically","actually","literally","just","really","very","so","kind","sort","like",
@@ -26,6 +31,11 @@ VAGUE = {"amazing","incredible","insane","crazy","huge","massive","game","change
 CONCRETE = re.compile(r"\b(\d[\d,.]*\s?(%|k|m|x|s|m|h)?|\$\d|\d+\s?(second|minute|hour|day|week|month|year)s?)\b", re.I)
 YOU = re.compile(r"\b(you|your|you're|youre|yourself)\b", re.I)
 STAKE = re.compile(r"\b(lose|lost|wasting|waste|quit|fail|broke|cost|risk|before|stop|never|die|dying|dead)\b", re.I)
+HIST_STAKE = re.compile(r"\b(fell|fall|fallen|war|killed|murdered|burned|burnt|sacked|collapsed?|betrayed|conquered|"
+                        r"destroyed|survived|ruled|empire|enslaved|starved|executed|massacred|vanished|army|armies|invaded|invasion|siege|enemy|civil war)\b", re.I)
+ERA = re.compile(r"\b\d{1,4}\s?(bc|bce|ad|ce)\b|\b(\d{1,2}(st|nd|rd|th)|first|second|third|fourth|fifth) century\b|"
+                 r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\b|"
+                 r"\b(in|by|around) (the year )?\d{3,4}\b", re.I)
 CURIOSITY = re.compile(r"\b(why|how|what|which|until|before|but|nobody|almost|except|reason|actually)\b", re.I)
 
 def words(t): return re.findall(r"[a-z0-9'%$.]+", t.lower())
@@ -46,8 +56,16 @@ def address(t):
     first = 30 if YOU.search(" ".join(t.split()[:6])) else 0
     return max(0, min(100, 26 + n * 20 + first))
 
+def anchor(t):
+    """history set: a time, a place or a person early on does the work 'you' does for a creator hook."""
+    head = " ".join(t.split()[:10])
+    era = len(ERA.findall(t)); early = bool(ERA.search(head))
+    names = sum(1 for x in t.split()[1:] if x[:1].isupper())
+    s = 26 + (34 if early else 0) + min(2, era) * 12 + min(3, names) * 8 + (10 if YOU.search(t) else 0)
+    return max(0, min(100, s))
+
 def stakes(t):
-    n = len(STAKE.findall(t))
+    n = len(STAKE.findall(t)) + (len(HIST_STAKE.findall(t)) if SET == "history" else 0)
     return max(0, min(100, 22 + n * 26 + (14 if CONCRETE.search(t) else 0)))
 
 def curiosity(t):
@@ -65,8 +83,19 @@ def brevity(t):
     if n < 9:  return max(30, 100 - (9 - n) * 11)
     return max(10, 100 - (n - 24) * 7)
 
+SET = "creator"
 PROPS = [("SPECIFICITY", specificity), ("ADDRESS", address), ("STAKES", stakes),
          ("CURIOSITY", curiosity), ("BREVITY", brevity)]
+
+
+def use_set(name):
+    """Switch formula set: 'creator' (default, hooks.json) or 'history' (hooks-history.json)."""
+    global SET, FORMULAS, PROPS
+    if name not in SETS: raise SystemExit(f"unknown --set {name!r}; choose from {', '.join(SETS)}")
+    SET = name
+    FORMULAS = json.load(open(os.path.join(HERE, SETS[name])))["hooks"]
+    second = ("ANCHOR", anchor) if name == "history" else ("ADDRESS", address)
+    PROPS = [("SPECIFICITY", specificity), second, ("STAKES", stakes), ("CURIOSITY", curiosity), ("BREVITY", brevity)]
 
 def classify(t):
     best, hits = None, 0
@@ -92,20 +121,29 @@ def report(t, parts, verdict, name, hits):
     print(f"    {'VERDICT':<12} {verdict:3d}  {band(verdict)}")
     print(f"    formula      {name}" + (f"  ({hits} pattern{'s' if hits != 1 else ''} matched)" if hits else "  (no formula matched - that is usually a summary, not a hook)"))
     low = min(parts, key=parts.get)
-    print(f"    weakest      {low} - {FIX[low]}")
+    fix = FIX_HISTORY.get(low, FIX[low]) if SET == "history" else FIX[low]
+    print(f"    weakest      {low} - {fix}")
 
 FIX = {
  "SPECIFICITY": "swap one adjective for a number, a name or a date",
  "ADDRESS": "say 'you' in the first six words",
+ "ANCHOR": "put a year, a place or a named person in the first ten words",
  "STAKES": "name what it costs them to keep doing it the current way",
  "CURIOSITY": "cut the half of the sentence that answers itself",
  "BREVITY": "9 to 24 words. Read it out loud and stop where you run out of breath",
+}
+
+FIX_HISTORY = {
+ "STAKES": "name what was lost, risked or destroyed - a city, an empire, lives",
+ "CURIOSITY": "end on the question the video answers, or the thing that does not add up",
 }
 
 def main():
     a = sys.argv[1:]
     as_json = "--json" in a
     a = [x for x in a if x != "--json"]
+    if "--set" in a:
+        i = a.index("--set"); use_set(a[i + 1] if i + 1 < len(a) else ""); del a[i:i + 2]
     if "--hook" in a:
         lines = [a[a.index("--hook") + 1]]
     elif a and os.path.exists(a[0]):
@@ -116,7 +154,7 @@ def main():
     for t in lines:
         parts, verdict, name, hits = score(t)
         out.append({"hook": t.strip(), "properties": parts, "verdict": verdict,
-                    "band": band(verdict), "formula": name, "matched": hits})
+                    "band": band(verdict), "formula": name, "matched": hits, "set": SET})
     out.sort(key=lambda r: -r["verdict"])
     if as_json:
         print(json.dumps([{k: v for k, v in r.items() if k != "matched"} for r in out], indent=1)); return

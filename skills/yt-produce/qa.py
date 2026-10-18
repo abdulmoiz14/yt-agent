@@ -161,6 +161,36 @@ def gate_seo(pdir):
     return [f"chapters-provisional.txt: {x}" for x in chapter_problems(p.read_text())] if p.exists() else []
 
 
+def gate_images(pdir):
+    """Every generated picture the plan uses was reviewed by yt-image-reviewer and approved in the creator's words."""
+    pdir = Path(pdir); probs = []
+    man, err = read_json(pdir / "visuals/manifest.json")
+    if err: return [err + " - made by images.py generate"]
+    plan, err = read_json(pdir / "visuals/plan.json")
+    if err: return [err + " - write it with images.py plan"]
+    rev, err = read_json(pdir / "visuals/review.json")
+    if err: return [err + " - run the yt-image-reviewer agent on the images"]
+    if not isinstance(rev, dict) or rev.get("checked_by") != "yt-image-reviewer":
+        probs.append("review.json checked_by must be yt-image-reviewer - the prompt writer does not grade its own images")
+    reviewed = {(r.get("scene"), r.get("file")) for r in (rev or {}).get("scenes", []) if isinstance(r, dict)} if isinstance(rev, dict) else set()
+    by_file = {e.get("file"): e for e in (man or {}).get("scenes", {}).values()}
+    for e in plan if isinstance(plan, list) else []:
+        img = e.get("image") or ""
+        if not img.startswith("visuals/images/"): continue
+        rec = by_file.get(Path(img).name)
+        if rec is None:
+            if str(e.get("licence", "")).lower().startswith("ai illustration"):
+                probs.append(f"plan uses {img} but the manifest has no record of it")
+            continue
+        if rec.get("status") != "approved" or not str(rec.get("approval_statement", "")).strip():
+            probs.append(f"{img} is in the plan but not approved by the creator (images.py approve --statement ...)")
+        if (rec.get("scene"), rec.get("file")) not in reviewed:
+            probs.append(f"{img} was not reviewed by yt-image-reviewer")
+        if not str(e.get("licence", "")).lower().startswith("ai illustration"):
+            probs.append(f"{img} is AI-generated but its licence does not say 'AI illustration'")
+    return probs
+
+
 def gate_qa(pdir):
     data = state.load(pdir)
     r = (data.get("qa") or {}).get("result")
@@ -168,7 +198,7 @@ def gate_qa(pdir):
 
 
 GATES = {"sources": gate_sources, "factcheck": gate_factcheck, "hooks": gate_hooks,
-         "package": gate_package, "seo": gate_seo, "qa": gate_qa}
+         "package": gate_package, "seo": gate_seo, "images": gate_images, "qa": gate_qa}
 
 
 def stage_gate(pdir, sid):
@@ -211,12 +241,13 @@ def full_run(pdir):
 
     for sid in state.ORDER:
         s = data["stages"][sid]; title = state.STAGE[sid]["title"]
-        if state.STAGE[sid]["phase"] == "post" or sid in ("qa", "handoff"): continue
+        if state.STAGE[sid]["phase"] != "pre" or sid in ("qa", "handoff"): continue
+        if sid in state.OPTIONAL and s["status"] == "pending": continue
         if s["status"] == "done":
             miss = state.outputs_present(pdir, state.STAGE[sid]["outputs"] + s["outputs"])
             probs = [f"missing {m}" for m in miss] + stage_gate(pdir, sid)
             add("FAIL" if probs else "PASS", f"stage {sid}", "; ".join(probs) or "outputs present, rules met")
-        elif s["status"] in ("unavailable", "skipped"):
+        elif s["status"] in ("unavailable", "skipped") or (sid in state.OPTIONAL and s["status"] == "needs_input"):
             add("WARN", f"stage {sid}", f"{s['status']}: {s['notes'][-1] if s['notes'] else ''}")
         else:
             lvl = "FAIL" if sid in ("intake", "sources", "script", "factcheck", "package", "seo") else "WARN"
@@ -227,7 +258,9 @@ def full_run(pdir):
 
     chosen = pdir / "hooks/chosen.txt"
     if chosen.exists() and chosen.read_text().strip():
-        out, err = run_tool(state.SIBLING_TOOLS["hookscore"], ["--hook", chosen.read_text().strip()])
+        scored, _ = read_json(pdir / "hooks/hookscore.json")
+        hset = scored[0].get("set") if isinstance(scored, list) and scored and isinstance(scored[0], dict) else None
+        out, err = run_tool(state.SIBLING_TOOLS["hookscore"], ["--hook", chosen.read_text().strip()] + (["--set", hset] if hset else []))
         if err: add("SKIP", "hook score", err)
         else:
             r = out[0]; msg = f"{r['verdict']} {r['band']} ({r['formula']}) - heuristic, not a predictor"
@@ -310,6 +343,25 @@ def full_run(pdir):
             add("WARN", label, f"{rep['output']} is a DRAFT: {rep['placeholders']} placeholder card(s) still need a cleared image")
         else:
             add("PASS", label, f"{rep['output']}, every image has a recorded licence - watch it through before upload")
+    ai_renders = []
+    for rj in sorted(pdir.glob("render/**/render.json")):
+        rep, _ = read_json(rj)
+        if isinstance(rep, dict) and any(str(s.get("licence") or "").lower().startswith("ai illustration")
+                                         for s in rep.get("segments", []) if s.get("kind") == "image"):
+            ai_renders.append(rj)
+            if not rep.get("label"):
+                add("FAIL", "AI disclosure", f"{rj.parent.relative_to(pdir)} uses AI images but has no on-screen label - re-render with this render.py")
+    rv, _ = read_json(pdir / "visuals/review.json")
+    if isinstance(rv, dict):
+        redo = [str(r.get("scene")) for r in rv.get("scenes", []) if isinstance(r, dict) and r.get("verdict") == "redo"]
+        if redo: add("WARN", "image review", f"scenes marked redo by yt-image-reviewer: {', '.join(redo)} - regenerate or confirm with the creator")
+    if ai_renders:
+        desc = pdir / "seo/description.md"
+        if desc.exists() and re.search(r"\bAI[- ]generated\b", desc.read_text(errors="replace"), re.I):
+            add("PASS", "AI disclosure", "on-screen label and a description line saying the illustrations are AI-generated")
+        else:
+            add("FAIL", "AI disclosure", "the video uses AI illustrations - seo/description.md must say so "
+                "(e.g. 'Illustrations in this video are AI-generated and are not historical images.')")
     srcs, _ = read_json(pdir / "research/sources.json")
     if isinstance(srcs, list) and srcs:
         weakq = [f"{s.get('id')} ({s.get('quote_check')})" for s in srcs if s.get("quote_check") != "raw_text_match"]
