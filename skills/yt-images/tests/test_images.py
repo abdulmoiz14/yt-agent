@@ -90,6 +90,18 @@ class TestGenerate(Base):
         self.assertEqual(sorted(x.name for x in (self.p / "visuals/images").iterdir()), ["scene_001.png", "scene_001.v2.png"])
         self.assertEqual(len(self.manifest()["scenes"]["1"]["history"]), 1)
 
+    def test_candidates_make_that_many_versions_keep_the_old_file_and_count_in_the_estimate(self):
+        d = self.prompts(1)
+        self.run_py("generate", str(self.p), "--provider", "fake", "--limit", "1")
+        d["scenes"][0]["prompt"] = "a redone scene"; (self.p / "visuals/prompts.json").write_text(json.dumps(d))
+        self.assertIn("--candidates must be", self.run_py("generate", str(self.p), "--provider", "fake", "--candidates", "9", ok=False).stderr)
+        r = self.run_py("generate", str(self.p), "--scenes", "1", "--candidates", "2", "--max-images", "2", "--max-spend", "0.05")
+        self.assertEqual(sorted(x.name for x in (self.p / "visuals/images").iterdir()), ["scene_001.png", "scene_001.v2.png", "scene_001.v3.png"])
+        self.assertEqual(self.manifest()["scenes"]["1"]["file"], "scene_001.v3.png"); self.assertEqual(len(self.manifest()["scenes"]["1"]["history"]), 2)
+        d["scenes"][0]["prompt"] = "redone again"; (self.p / "visuals/prompts.json").write_text(json.dumps(d))
+        r = self.run_py("generate", str(self.p), "--scenes", "1", "--candidates", "2", "--max-spend", "0.01", ok=False)    # 2 x 0.00882 > 0.01
+        self.assertIn("above --max-spend", r.stderr)
+
     def test_title_cards_are_not_generated(self):
         d = self.prompts(2); d["scenes"].append({"scene": 3, "start_line": 5, "kind": "title", "card": "753 BC", "subtitle": "Rome is founded"})
         (self.p / "visuals/prompts.json").write_text(json.dumps(d))
@@ -152,6 +164,50 @@ class TestReviewApprovePlan(Base):
         src = Path(self.tmp.name) / "scene_002.jpg"; src.write_bytes(png(400, 300))
         self.run_py("import", str(q), str(src))
         self.assertEqual(images.probe(q / "visuals/images/scene_002.png"), (400, 224))
+
+
+class TestReviewHash(Base):
+    def setUp(self):
+        super().setUp(); self.prompts(3)
+        self.run_py("generate", str(self.p), "--provider", "fake", "--limit", "3")
+        self.rj = self.p / "visuals/review.json"
+
+    def write_review(self, scenes):
+        self.rj.write_text(json.dumps({"checked_by": "yt-image-reviewer", "scenes": [
+            {"scene": n, "verdict": "ok", "problems": []} for n in scenes]}))
+
+    def todo(self): return self.run_py("review-todo", str(self.p)).stdout
+
+    def test_unchanged_image_is_skipped(self):
+        self.write_review([1, 2, 3]); self.run_py("review-stamp", str(self.p), "--scenes", "all")
+        self.assertIn("0 scene(s) to review", self.todo())
+
+    def test_changed_image_is_listed(self):
+        self.write_review([1, 2, 3]); self.run_py("review-stamp", str(self.p), "--scenes", "all")
+        (self.p / "visuals/images/scene_002.png").write_bytes(png(80, 60))
+        out = self.todo()
+        self.assertIn("scene 002 changed", out); self.assertNotIn("scene 001", out); self.assertIn("1 scene(s)", out)
+
+    def test_missing_hash_listed_once_then_stored(self):
+        self.write_review([1, 2, 3])
+        out = self.todo()
+        self.assertIn("scene 001 not hashed", out); self.assertIn("3 scene(s)", out)
+        self.run_py("review-stamp", str(self.p), "--scenes", "1-3")
+        self.assertIn("0 scene(s)", self.todo())
+        d = json.loads(self.rj.read_text())
+        self.assertTrue(all(len(r["sha256"]) == 64 and r["verdict"] == "ok" for r in d["scenes"]))
+
+    def test_new_scene_is_listed(self):
+        self.write_review([1, 2]); self.run_py("review-stamp", str(self.p), "--scenes", "1,2")
+        out = self.todo()
+        self.assertIn("scene 003 new", out); self.assertNotIn("scene 001", out); self.assertIn("1 scene(s)", out)
+
+    def test_stamp_needs_scenes_and_only_touches_named(self):
+        self.write_review([1, 2, 3])
+        self.assertIn("--scenes", self.run_py("review-stamp", str(self.p), ok=False).stderr)
+        self.run_py("review-stamp", str(self.p), "--scenes", "2")
+        out = self.todo()
+        self.assertIn("scene 001 not hashed", out); self.assertNotIn("scene 002", out)
 
 
 class TestOpenLux(unittest.TestCase):

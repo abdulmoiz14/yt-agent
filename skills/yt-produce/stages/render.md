@@ -69,7 +69,10 @@ Options to ask the creator about - never switch them on silently:
 - `--transition cut` for hard cuts instead of crossfades.
 
 AI illustrations make render.py burn a small "AI illustration" label into the corner for the whole
-video; it cannot be turned off (`--label-text` can reword it).
+video (`--label-text` rewords it). Only the creator can turn it off, by writing `ai_label: off` with the
+date and the reason in the project's `brief.md` (or the channel notes it points to with `channel_notes:`;
+see `settings.py`); never switch it off on your own. When it is off, the description must still say the
+images are AI-generated, and `qa.py` reports "label off by creator decision".
 
 Output: `render/draft.mp4` while any placeholder card remains, `render/video.mp4` once every segment
 is a cleared image. Also `render/captions.srt` (upload it to YouTube too), `render/credits.txt` (put

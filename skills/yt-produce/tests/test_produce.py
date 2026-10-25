@@ -8,6 +8,7 @@ from pathlib import Path
 
 SKILL = Path(__file__).resolve().parent.parent
 STATE, QA, QC = SKILL / "state.py", SKILL / "qa.py", SKILL / "quotecheck.py"
+DISC = "Narration and illustrations in this video are AI-generated. The script is researched from the sources listed below."
 PAGE = """<html><head><title>x</title><script>var hidden = "The city fell on 29 May 1453.";</script></head>
 <body><nav>menu</nav><p>After a siege of 53 days, the city fell on 29&nbsp;May 1453.[12] Mehmed&rsquo;s
 cannon &mdash; built by Orban &mdash; had battered the walls.</p></body></html>"""
@@ -597,6 +598,25 @@ class TestRender(Base):
                             "-of", "csv=p=0", str(p / "render/short/draft.mp4")], capture_output=True, text=True)
         self.assertEqual(r.stdout.strip(), "1080,1920")
 
+    def test_qa_fails_a_video_whose_picture_ends_before_its_sound(self):
+        p = self.proj(); self.plan(p); self.run_py(RENDER, str(p), "--size", "640x360", "--no-captions")
+        self.assertNotIn("picture ends at", self.run_py(QA, p.name, ok=None).stdout)
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(p / "render/draft.mp4"), "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-an", str(p / "v.mp4")], check=True)
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", str(p / "v.mp4"), "-i", str(p / "render/draft.mp4"), "-map", "0:v", "-map", "1:a",
+                        "-c:v", "copy", "-c:a", "copy", str(p / "render/short.mp4")], check=True)
+        (p / "render/draft.mp4").unlink(); (p / "render/short.mp4").rename(p / "render/draft.mp4")
+        os.utime(p / "render/render.json")
+        self.assertRegex(self.run_py(QA, p.name, ok=False).stdout, r"FAIL\s+render render\s+.*picture ends at")
+
+    def test_qa_ignores_archived_renders_in_old_folders(self):
+        p = self.proj(); self.plan(p, licence="Public domain"); self.run_py(RENDER, str(p), "--size", "640x360", "--no-captions")
+        (p / "render/_old/x").mkdir(parents=True)
+        bad = json.loads((p / "render/render.json").read_text()); bad["segments"][0]["licence"] = None
+        self.w(p, "render/_old/x/render.json", json.dumps(bad))
+        out = self.run_py(QA, p.name, ok=None).stdout
+        self.assertNotIn("_old", out); self.assertNotRegex(out, r"FAIL\s+render")
+
     def test_unlicensed_image_in_report_fails_qa_and_stale_render_warns(self):
         p = self.proj(); self.plan(p); self.run_py(RENDER, str(p), "--size", "640x360", "--no-captions")
         rep = json.loads((p / "render/render.json").read_text()); rep["segments"][0]["licence"] = None
@@ -800,11 +820,25 @@ class TestImagesStage(Base):
         self.w(p, "render/render.json", json.dumps({"output": "render/video.mp4", "draft": False, "label": "AI illustration",
                "segments": [{"index": 0, "kind": "image", "licence": self.LIC}]}))
         self.assertRegex(self.run_py(QA, p.name, ok=False).stdout, r"FAIL\s+AI disclosure\s+the video uses AI illustrations")
-        self.w(p, "seo/description.md", "Why the walls fell.\nIllustrations in this video are AI-generated and are not historical images.\n")
+        self.w(p, "seo/description.md", "Why the walls fell.\n" + DISC + "\nSources:\n- https://example.org/fall\n")
         self.assertRegex(self.run_py(QA, p.name, ok=None).stdout, r"PASS\s+AI disclosure")
         rep = json.loads((p / "render/render.json").read_text()); rep["label"] = None
         self.w(p, "render/render.json", json.dumps(rep))
         self.assertRegex(self.run_py(QA, p.name, ok=False).stdout, r"FAIL\s+AI disclosure\s+render uses AI images but has no on-screen label")
+
+    def test_disclosure_line_and_sources_are_required_in_description_and_upload_pack(self):
+        p = self.new(); self.complete(p)
+        self.w(p, "render/render.json", json.dumps({"output": "render/video.mp4", "draft": False, "label": "AI illustration",
+               "segments": [{"index": 0, "kind": "image", "licence": self.LIC}]}))
+        self.w(p, "seo/description.md", "Why.\nIllustrations in this video are AI-generated.\nhttps://example.org/a\n")      # not the agreed line
+        self.assertRegex(self.run_py(QA, p.name, ok=False).stdout, r"FAIL\s+AI disclosure\s+.*is missing")
+        self.w(p, "seo/description.md", "Why.\n" + DISC + "\n")                                                              # line but no sources
+        self.assertRegex(self.run_py(QA, p.name, ok=False).stdout, r"FAIL\s+AI disclosure\s+.*no source link")
+        self.w(p, "seo/description.md", "Why.\n" + DISC + "\n- https://example.org/a\n")
+        self.w(p, "publish/upload-pack.md", "# Upload pack\nno disclosure here\n")                                           # the pack needs it too
+        self.assertRegex(self.run_py(QA, p.name, ok=False).stdout, r"FAIL\s+AI disclosure\s+.*upload-pack.md: the line")
+        self.w(p, "publish/upload-pack.md", "# Upload pack\n" + DISC.replace(" ", "\n") + "\nhttps://example.org/a\n")      # line wrapped over lines still counts
+        self.assertRegex(self.run_py(QA, p.name, ok=None).stdout, r"PASS\s+AI disclosure\s+.*description draft and upload pack")
 
     def test_image_capability_checks_key_file_without_reading_it(self):
         key = Path(self.tmp.name) / "openlux.key"; key.write_text("sk-NEVER-PRINT-ME"); os.chmod(key, 0o644)
@@ -825,6 +859,221 @@ class TestImagesStage(Base):
         res = self.run_py(QA, p.name, ok=None).stdout
         self.assertRegex(res, r"(PASS|WARN|FAIL)\s+hook score\s+\d+ (STRONG|WORKABLE|WEAK) \((The Turning Point|The Cold Open|The Question)\)")
 
+CAPTIONS = SKILL / "captions.py"
+
+
+class TestCaptions(Base):
+    def test_srt_time_never_writes_1000_ms(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("yt_render", RENDER); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+        self.assertEqual(m.srt_time(59.9996), "00:01:00,000"); self.assertEqual(m.srt_time(3661.5), "01:01:01,500")
+
+    def test_validator_catches_overlap_long_lines_and_bad_times(self):
+        sys.path.insert(0, str(SKILL)); import captions
+        ok = "1\n00:00:00,000 --> 00:00:02,000\nHello there\n\n2\n00:00:02,000 --> 00:00:04,000\nSecond cue\n"
+        self.assertEqual(captions.validate_srt(ok, 4.0), [])
+        self.assertTrue(captions.validate_srt(ok.replace("00:00:02,000 --> 00:00:04", "00:00:01,500 --> 00:00:04")))
+        self.assertTrue(captions.validate_srt(ok.replace("Hello there", "x" * 43)))
+        self.assertTrue(captions.validate_srt(ok.replace("00:00:04,000", "00:00:03,1000")))
+        self.assertTrue(captions.validate_srt(ok, 3.0))                                  # runs past the narration
+        self.assertTrue(captions.validate_srt(ok.replace("\n2\n", "\n5\n")))           # numbering gap
+
+    def test_writes_valid_srt_and_vtt_from_narration_timings(self):
+        p = self.new(); (p / "narration").mkdir(exist_ok=True)
+        self.w(p, "narration/v3-voiceover.json", json.dumps(VO_JSON))
+        out = self.run_py(CAPTIONS, str(p), "--variant", "v3").stdout
+        self.assertIn("3 cues, valid", out)
+        vtt = (p / "render/v3/captions.vtt").read_text()
+        self.assertTrue(vtt.startswith("WEBVTT\n\n")); self.assertIn("00:00:02.000 --> 00:00:03.980", vtt)
+        (p / "render/v3/captions.vtt").write_text(vtt.replace("00:00:02.000", "00:00:02,000"))
+        self.assertIn("FAIL", self.run_py(CAPTIONS, str(p), "--variant", "v3", "--check-only", ok=False).stdout)
+
+
+@unittest.skipUnless(__import__("shutil").which("ffmpeg"), "ffmpeg not installed")
+class TestEnhancedRender(Base):
+    def setUp(self):
+        super().setUp()
+        try: import PIL, numpy  # noqa: F401
+        except ImportError: self.skipTest("Pillow and numpy not installed")
+
+    def proj(self):
+        p = TestRender.proj(self)
+        self.w(p, "visuals/plan.json", json.dumps([
+            {"start_line": 0, "kind": "title", "card": "1453", "subtitle": "The last siege"},
+            {"start_line": 1, "image": "visuals/images/walls.png", "card": "The walls",
+             "licence": "AI illustration - creator-generated (openlux:gpt-image-2-c)"}]))
+        return p
+
+    def test_no_flags_means_no_effects(self):
+        p = self.proj(); dry = self.run_py(RENDER, str(p), "--dry-run").stdout
+        self.assertNotIn("enhanced effects", dry); self.assertNotIn("STING", dry)
+
+    def test_opening_needs_a_licensed_emblem(self):
+        p = self.proj()
+        self.assertIn("--emblem", self.run_py(RENDER, str(p), "--opening", "--dry-run", ok=False).stderr)
+        err = self.run_py(RENDER, str(p), "--opening", "--emblem", "visuals/images/walls.png", "--dry-run", ok=False).stderr
+        self.assertIn("--emblem-licence", err)
+        self.assertIn("enhanced effects", self.run_py(RENDER, str(p), "--opening", "--emblem", "visuals/images/walls.png",
+                      "--emblem-licence", "made locally for this test", "--dry-run").stdout)
+
+    def test_enhanced_refuses_shorts_and_hard_cuts(self):
+        p = self.proj()
+        self.assertIn("long video", self.run_py(RENDER, str(p), "--texture", "--clip", "0", "1", "--dry-run", ok=False).stderr)
+        self.assertIn("crossfades", self.run_py(RENDER, str(p), "--texture", "--transition", "cut", "--dry-run", ok=False).stderr)
+
+    def test_enhanced_render_keeps_label_burns_no_captions_and_logs_effects(self):
+        p = self.proj()
+        self.run_py(RENDER, str(p), "--size", "640x360", "--animate-cards", "--texture", "--output", "render/enh/enh.mp4")
+        rep = json.loads((p / "render/enh/render.json").read_text())
+        self.assertFalse(rep["burned_captions"]); self.assertEqual(rep["label"], "AI illustration")
+        self.assertTrue(rep["enhanced"]["label_on_top"]); self.assertTrue((p / "render/enh/enh.mp4").stat().st_size > 1000)
+        self.assertTrue((p / "render/enh/effects-log.md").read_text().strip())
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(p / "render/enh/enh.mp4")],
+                           capture_output=True, text=True)
+        self.assertAlmostEqual(float(r.stdout), 6.0, delta=0.15)                             # effects never change the timing
+        self.assertFalse((p / "render/video.mp4").exists())                                  # --output leaves the usual place alone
+
+    def test_name_tags_must_come_from_supported_claims(self):
+        sys.path.insert(0, str(SKILL)); import effects
+        p = self.new()
+        self.w(p, "factcheck/claims.json", json.dumps({"claims": [
+            {"id": "C1", "text": "Caesar was assassinated in 44 BC.", "status": "supported"},
+            {"id": "C2", "text": "Hannibal crossed the Alps.", "status": "unsupported"}]}))
+        lines = [{"line": "Intro.", "start": 0, "end": 25}, {"line": "Then Caesar fell.", "start": 25, "end": 30},
+                 {"line": "Hannibal came.", "start": 30, "end": 35}]
+        tags = [{"name": "Caesar", "fact": "Assassinated in 44 BC", "claims": ["C1"]},
+                {"name": "Caesar", "fact": "Assassinated in 45 BC", "claims": ["C1"]},        # invented year
+                {"name": "Hannibal", "fact": "Crossed the Alps", "claims": ["C2"]},           # claim not supported
+                {"name": "Livy", "fact": "Historian", "claims": ["C9"]}]                      # unknown claim
+        self.w(p, "tags.json", json.dumps(tags))
+        ok, problems = effects.load_name_tags(p / "tags.json", p / "factcheck/claims.json", lines)
+        self.assertEqual([t["name"] for t in ok], ["Caesar"]); self.assertEqual(len(problems), 3)
+        self.assertEqual(ok[0]["t"], 25)
+
+    def test_sound_events_whoosh_on_cards_click_on_every_third_plain_change(self):
+        sys.path.insert(0, str(SKILL)); import effects
+        img = lambda t: {"kind": "image", "start": t, "end": t + 5, "card": "x"}
+        segs = [img(0)] + [img(30 + 5 * i) for i in range(9)]
+        segs.insert(4, {"kind": "title", "start": 45, "end": 50, "card": "1453"})
+        segs = segs[:4] + [dict(segs[4])] + [dict(x, start=x["start"] + 5) for x in segs[5:]]
+        bounds = [None] + [{"kind": "fade", "d": 0.6} for _ in segs[1:]]
+        ev = effects.sfx_events(segs, bounds)
+        self.assertEqual([e for e in ev if e[1] == "whoosh"][0][0], 45)                  # the card
+        clicks = [e for e in ev if e[1] == "click"]
+        self.assertTrue(clicks and all(c[0] >= effects.OPEN_SEC + 4 for c in clicks))
+        times = [e[0] for e in ev]; self.assertTrue(all(b - a >= effects.SFX_GAP for a, b in zip(times, times[1:])))
+        self.assertLess(len(clicks), len(segs) // 2)                                      # about every third, never every change
+
+    def test_smooth_motion_boxes_move_evenly_in_float_pixels(self):
+        sys.path.insert(0, str(SKILL)); import effects
+        for mo in ("zoom_in", "zoom_out", "pan_left", "pan_right", "pan_up", "pan_down"):
+            bx = [effects.motion_box(mo, n / 179, 1920, 1080, 1536, 864) for n in range(179)]
+            for a in bx: self.assertGreaterEqual(a[0], -1e-9); self.assertLessEqual(a[2], 1536 + 1e-9); self.assertLessEqual(a[3], 864 + 1e-9)
+            steps = [b[0] - a[0] for a, b in zip(bx, bx[1:])]
+            if mo in ("zoom_in", "zoom_out", "pan_left", "pan_right"):                   # never a stall then a jump
+                self.assertTrue(all(x > 1e-6 for x in steps) or all(x < -1e-6 for x in steps), mo)
+                self.assertTrue(all(abs(b - a) < 0.15 * abs(a) for a, b in zip(steps, steps[1:])), mo)
+
+    def test_smooth_motion_flag_renders_and_is_recorded(self):
+        p = self.proj()
+        self.run_py(RENDER, str(p), "--size", "640x360", "--smooth-motion", "--output", "render/sm/sm.mp4")
+        self.assertTrue(json.loads((p / "render/sm/render.json").read_text())["smooth_motion"])
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(p / "render/sm/sm.mp4")],
+                           capture_output=True, text=True)
+        self.assertAlmostEqual(float(r.stdout), 6.0, delta=0.15)
+        self.run_py(RENDER, str(p), "--size", "640x360", "--output", "render/old/old.mp4")
+        self.assertFalse(json.loads((p / "render/old/render.json").read_text())["smooth_motion"])   # off unless asked for
+        self.assertIn("long video", self.run_py(RENDER, str(p), "--smooth-motion", "--clip", "0", "1", "--dry-run", ok=False).stderr)
+
+    def test_join_keeps_every_clip_when_clips_are_a_little_short_of_the_plan(self):
+        sys.path.insert(0, str(SKILL)); import effects
+        work = self.new(); work = work / "w"; work.mkdir()
+        counts = [71, 71, 71, 68, 70, 90, 90, 71, 71, 71]            # drawn lengths: rounded down, so a hair short of 2.38 s etc.
+        files = []
+        for i, n in enumerate(counts):
+            f = work / f"c{i}.mp4"; files.append(f)
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"testsrc=s=160x90:r=30", "-frames:v", str(n),
+                            "-c:v", "libx264", "-pix_fmt", "yuv420p", str(f)], check=True)
+        d1 = 1 / 30
+        bounds = [None, {"d": 0.2, "xf": "fade"}] + [{"d": d1, "xf": "fade"}] * 3 + [{"d": 0.5, "xf": "fade"}] + [{"d": d1, "xf": "fade"}] * 4
+        segs = [{"length": n / 30 + 0.016} for n in counts]            # the plan is always slightly longer than the clip
+        out = effects.join(files, segs, bounds, work, lambda c, w: subprocess.run(c, check=True), chunk=4)
+        want = sum(counts) - sum(max(1, round(b["d"] * 30)) for b in bounds[1:])
+        self.assertLessEqual(abs(effects.nframes(out) - want), 2)        # before the fix a flash/cut boundary dropped everything after it
+
+    def test_hook_end_time_follows_the_spoken_numbers(self):
+        sys.path.insert(0, str(SKILL)); import effects
+        lines = [{"line": "Seven fifty-three BC, according to legend:", "start": 0, "end": 4}, {"line": "Romulus was king.", "start": 4, "end": 7},
+                 {"line": "Something else.", "start": 7, "end": 9}]
+        self.assertEqual(effects.hook_end_time("753 BC, according to legend: Romulus was king.", lines), 7)
+        self.assertIsNone(effects.hook_end_time("A different hook.", lines))
+
+
+@unittest.skipUnless(__import__("shutil").which("ffmpeg"), "ffmpeg not installed")
+class TestAiLabelSetting(Base):
+    NOTE = "ai_label: off - 2026-10-22, creator's decision; disclosure is in the description"
+
+    def ai_proj(self):
+        p = TestRender.proj(self)
+        self.w(p, "visuals/plan.json", json.dumps([
+            {"start_line": 0, "kind": "title", "card": "1453", "subtitle": "The last siege"},
+            {"start_line": 1, "image": "visuals/images/walls.png", "card": "The walls",
+             "licence": "AI illustration - creator-generated (openlux:gpt-image-2-c)"}]))
+        return p
+
+    def test_setting_is_read_from_brief_then_channel_notes_and_defaults_to_on(self):
+        sys.path.insert(0, str(SKILL)); import settings
+        p = self.new()
+        self.w(p, "brief.md", "# Brief\n")
+        self.assertEqual(settings.ai_label(p)[:2], ("on", "default"))
+        chan = p / "channel-CLAUDE.md"; chan.write_text("## Rules\n- ai_label: off - 2026-10-22, channel default\n")
+        self.w(p, "brief.md", f"# Brief\nchannel_notes: {chan}\n")
+        self.assertEqual(settings.ai_label(p), ("off", str(chan), "2026-10-22, channel default"))
+        self.w(p, "brief.md", f"# Brief\nchannel_notes: {chan}\nai_label: on\n")                   # the project overrides the channel
+        self.assertEqual(settings.ai_label(p)[:2], ("on", "brief.md"))
+        self.w(p, "brief.md", f"# Brief\n{self.NOTE}\n")
+        v, src, note = settings.ai_label(p)
+        self.assertEqual((v, src), ("off", "brief.md")); self.assertIn("2026-10-22", note); self.assertIn("creator's decision", note)
+
+    def test_render_burns_the_label_by_default_and_omits_it_only_when_the_creator_said_so(self):
+        p = self.ai_proj()
+        self.assertIn("label 'AI illustration'", self.run_py(RENDER, str(p), "--dry-run").stdout)
+        self.w(p, "brief.md", f"# Brief\n{self.NOTE}\n")
+        dry = self.run_py(RENDER, str(p), "--dry-run").stdout
+        self.assertIn("label OFF", dry); self.assertNotIn("label 'AI illustration'", dry)
+        self.run_py(RENDER, str(p), "--size", "640x360", "--no-captions")
+        rep = json.loads((p / "render/render.json").read_text())
+        self.assertIsNone(rep["label"]); self.assertIsNone(rep["label_geometry"])
+        self.assertEqual((rep["ai_label"]["setting"], rep["ai_label"]["shown"], rep["ai_label"]["source"]), ("off", False, "brief.md"))
+        self.assertIn("AI-generated", (p / "render/credits.txt").read_text())                     # the credits still disclose the AI images
+        self.assertIn("label 'AI illustration'", self.run_py(RENDER, str(p), "--ai-label", "on", "--dry-run").stdout)   # the flag can force it back
+        self.assertIn("--ai-label must be", self.run_py(RENDER, str(p), "--ai-label", "maybe", "--dry-run", ok=False).stderr)
+
+    def test_enhanced_render_without_label_still_works(self):
+        try: import PIL, numpy  # noqa: F401
+        except ImportError: self.skipTest("Pillow and numpy not installed")
+        p = self.ai_proj(); self.w(p, "brief.md", f"# Brief\n{self.NOTE}\n")
+        self.run_py(RENDER, str(p), "--size", "640x360", "--animate-cards", "--texture", "--output", "render/e/e.mp4")
+        rep = json.loads((p / "render/e/render.json").read_text())
+        self.assertFalse(rep["enhanced"]["label_on_top"]); self.assertFalse(rep["burned_captions"]); self.assertIsNone(rep["label"])
+
+    def test_qa_fails_a_missing_label_unless_the_creator_turned_it_off(self):
+        p = self.ai_proj(); self.w(p, "brief.md", f"# Brief\n{self.NOTE}\n")
+        self.run_py(RENDER, str(p), "--size", "640x360", "--no-captions")
+        self.assertRegex(self.run_py(QA, p.name, ok=None).stdout, r"PASS\s+AI label\s+.*label off by creator decision")
+        self.assertNotRegex(self.run_py(QA, p.name, ok=None).stdout, r"FAIL\s+AI disclosure\s+\S+ uses AI images but has no on-screen label")
+        self.w(p, "brief.md", "# Brief\n")                                                           # setting removed: the same video now FAILs
+        self.assertRegex(self.run_py(QA, p.name, ok=False).stdout, r"FAIL\s+AI disclosure\s+\S+ uses AI images but has no on-screen label")
+        self.w(p, "brief.md", "# Brief\nai_label: on\n")
+        self.assertRegex(self.run_py(QA, p.name, ok=False).stdout, r"FAIL\s+AI disclosure\s+\S+ uses AI images but has no on-screen label")
+
+    def test_description_must_still_disclose_when_the_label_is_off(self):
+        p = self.ai_proj(); self.w(p, "brief.md", f"# Brief\n{self.NOTE}\n")
+        self.run_py(RENDER, str(p), "--size", "640x360", "--no-captions")
+        self.assertRegex(self.run_py(QA, p.name, ok=False).stdout, r"FAIL\s+AI disclosure\s+the video uses AI illustrations - every description draft")
+        self.w(p, "seo/description.md", "Why the walls fell.\n" + DISC + "\nSources:\n- https://example.org/fall\n")
+        self.assertRegex(self.run_py(QA, p.name, ok=None).stdout, r"PASS\s+AI disclosure\s+.*carry the AI-disclosure line followed by the sources")
+
 
 class TestSafety(unittest.TestCase):
     def test_skill_rules_present(self):
@@ -834,7 +1083,7 @@ class TestSafety(unittest.TestCase):
         self.assertIn("ask for it and wait", s)
 
     def test_no_upload_or_network_code(self):
-        src = "".join((SKILL / f).read_text() for f in ("state.py", "qa.py", "quotecheck.py", "tts.py", "render.py", "collect.py"))
+        src = "".join((SKILL / f).read_text() for f in ("state.py", "qa.py", "quotecheck.py", "tts.py", "render.py", "collect.py", "effects.py", "captions.py", "settings.py"))
         for bad in ("urllib", "requests", "http.client", "socket", "googleapiclient", "youtube.upload",
                     "ANTHROPIC_API_KEY", "api_key"):
             self.assertNotIn(bad, src, bad)
@@ -847,6 +1096,10 @@ class TestSafety(unittest.TestCase):
             self.assertIn(f"\nmodel: {model}\n", head, name)
             self.assertIn(f"name: {name}", head)
         self.assertIn("yt-writer", (SKILL / "SKILL.md").read_text())
+
+    def test_image_reviewer_counts_limbs(self):
+        text = (SKILL.parent.parent / "agents/yt-image-reviewer.md").read_text()
+        self.assertIn("Limb count", text); self.assertIn("exactly two of each", text); self.assertIn("unless a limb is hidden by the pose", text)
 
     def test_no_reference_to_yt_project(self):
         for f in SKILL.rglob("*"):

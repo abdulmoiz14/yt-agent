@@ -8,10 +8,13 @@ key YOU saved in a file outside every repo. Nothing is uploaded or published.
     python3 images.py check <project>                     # validate prompts, print what would be sent
     python3 images.py generate <project> --limit 3 --max-spend 0.05            # small test batch first
     python3 images.py generate <project> --max-images 120 --max-spend 1.20     # the rest
+    python3 images.py generate <project> --scenes 3 --candidates 2 --max-images 2 --max-spend 0.05   # 2 new versions of one scene
     python3 images.py retry <project> --max-spend 0.10    # failed scenes only, never automatic
     python3 images.py sheet <project>                     # visuals/contact-sheet.html (images, prompts, review)
     python3 images.py approve <project> --scenes all --statement "the creator's own words"
     python3 images.py plan <project>                      # visuals/plan.json for render.py (approved scenes only)
+    python3 images.py review-todo <project>               # scenes the image review still has to look at (new, changed or not hashed)
+    python3 images.py review-stamp <project> --scenes 1-6 # after the review: store each image's sha256 in its review entry
     python3 images.py thumb <project> --text "ROME FELL" [--from-scene 4 | --prompt "..."] --max-spend 0.02
     python3 images.py import <project> files...           # images you made elsewhere (matched by scene_NNN or order)
     python3 images.py status <project>
@@ -331,6 +334,9 @@ def cmd_generate(p, a, retry_only=False):
     todo = [(sc, req, key) for sc, req, key in jobs(p, data, pname)
             if (not only or sc["scene"] in only) and needs_work(p, m, sc["scene"], key, retry_only)]
     if limit is not None: todo = todo[:limit]
+    cands = a.get("candidates") or 1
+    if not 1 <= cands <= 4: die("--candidates must be 1 to 4")
+    todo = [t for t in todo for _ in range(cands)]          # each pass makes its own version; the earlier ones stay in the history
     spend_check(cfg, a, prov_name, model, len(todo))
     if not todo: print("nothing to generate - every scene already has its image"); return 0
     try: provider = make_provider(prov_name, cfg, model, a.get("max_images"))
@@ -390,6 +396,41 @@ def load_review(p):
     try: d = json.loads(f.read_text(encoding="utf-8"))
     except json.JSONDecodeError: return {}
     return {r["scene"]: r for r in d.get("scenes", []) if isinstance(r, dict) and isinstance(r.get("scene"), int)}
+
+
+def sha256_file(f):
+    h = hashlib.sha256()
+    with open(f, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""): h.update(chunk)
+    return h.hexdigest()
+
+
+def review_todo(p):
+    """[(scene, reason)] for images the image review has to look at: no review entry, an entry without a hash
+    (older reviews, listed once, then stamped), or an entry whose stored sha256 differs from the file now."""
+    m = load_manifest(p); rv = load_review(p); out = []
+    for k in sorted(m["scenes"], key=int):
+        e = m["scenes"][k]; f = paths(p)["images"] / e.get("file", "")
+        if e.get("status") not in STATUS_DONE or not f.is_file(): continue
+        r = rv.get(int(k))
+        if r is None: out.append((int(k), "new"))
+        elif not r.get("sha256"): out.append((int(k), "not hashed"))
+        elif r["sha256"] != sha256_file(f): out.append((int(k), "changed"))
+    return out
+
+
+def cmd_review_stamp(p, scenes):
+    """Store the current sha256 of each named scene's image in its review entry. Run it after the review of those scenes."""
+    f = paths(p)["review"]
+    if not f.is_file(): die("no visuals/review.json yet")
+    d = json.loads(f.read_text(encoding="utf-8")); m = load_manifest(p); n = 0
+    for r in d.get("scenes", []):
+        if not isinstance(r, dict) or not isinstance(r.get("scene"), int): continue
+        e = m["scenes"].get(str(r["scene"])); img = paths(p)["images"] / e["file"] if e and e.get("file") else None
+        if (scenes is None or r["scene"] in scenes) and img and img.is_file():
+            r["sha256"] = sha256_file(img); n += 1
+    atomic_write(f, json.dumps(d, indent=1, ensure_ascii=False) + "\n")
+    print(f"stamped {n} review entr{'y' if n == 1 else 'ies'}")
 
 
 def cmd_approve(p, scenes, statement):
@@ -520,7 +561,7 @@ def main():
         try: return cast(rest[i + 1])
         except ValueError: die(f"{flag}: bad value {rest[i + 1]!r}")
     o = {"provider": opt("--provider"), "model": opt("--model"), "limit": opt("--limit", int),
-         "max_spend": opt("--max-spend", float), "max_images": opt("--max-images", int),
+         "max_spend": opt("--max-spend", float), "max_images": opt("--max-images", int), "candidates": opt("--candidates", int),
          "scenes": parse_scenes(opt("--scenes")), "text": opt("--text"), "prompt": opt("--prompt"),
          "from_scene": opt("--from-scene", int), "side": opt("--side")}
     if not p.is_dir(): die(f"{p} is not a project folder")
@@ -541,6 +582,13 @@ def main():
     elif cmd == "sheet": print(write_sheet(p))
     elif cmd == "approve": cmd_approve(p, o["scenes"], opt("--statement"))
     elif cmd == "plan": cmd_plan(p)
+    elif cmd == "review-todo":
+        todo = review_todo(p)
+        for n, why in todo: print(f"scene {n:03d} {why}")
+        print(f"{len(todo)} scene(s) to review")
+    elif cmd == "review-stamp":
+        if "--scenes" not in rest: die("review-stamp needs --scenes (the scenes the review just finished), e.g. --scenes 1-6")
+        cmd_review_stamp(p, o["scenes"])
     elif cmd == "thumb": cmd_thumb(p, o)
     elif cmd == "import": sys.exit(cmd_import(p, rest))
     elif cmd == "status":

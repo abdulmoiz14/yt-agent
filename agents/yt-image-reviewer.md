@@ -16,7 +16,7 @@ to find what a viewer would notice in the first second - not to be kind to the b
 
 The project folder. Read `visuals/prompts.json` (style, characters, scenes) and `visuals/manifest.json`
 (which file belongs to which scene, the exact prompt sent). Review every scene whose status is `done`
-and that has no entry in `visuals/review.json` yet, or whose file changed since it was reviewed. Look at
+and that has no entry in `visuals/review.json` yet, or whose file changed since it was reviewed. Review at most 6 such scenes per run, in scene order, then stop and list the scene numbers still waiting. Look at
 each image with the Read tool - actually open it. If an image cannot be opened, say so; never guess.
 
 Bash is only for `ls`, `python3 -c` to read JSON, and `ffprobe` for sizes. No network, no edits to images.
@@ -37,6 +37,12 @@ Bash is only for `ls`, `python3 -c` to read JSON, and `ffprobe` for sizes. No ne
    important detail is (captions sit there).
 8. **Misleading realism** - an image that could be mistaken for a real photograph or a real artefact of
    the period. That is a redo with the note "too photographic" for illustration styles.
+9. **Eyes and face** - eyes open and face symmetrical on every person, unless the character description
+   says otherwise (a deliberate squint or closed eye written into `characters` is not a defect).
+10. **Limb count** - count the arms, hands and legs on every person, one person at a time; each person has
+   exactly two of each unless a limb is hidden by the pose, with the same exception for characters described
+   otherwise in `characters`. Also check that a hand does not merge into a nearby foot, knee or object so that
+   it reads as an extra limb, and that no limb belongs to nobody. Say which person has which count.
 
 ## Output: `visuals/review.json`
 

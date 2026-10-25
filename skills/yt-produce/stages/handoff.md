@@ -23,10 +23,15 @@ Then, each in a fenced block they can copy:
 Then, outside the blocks:
 
 - QA result and every WARN/SKIP from `qa/report.md`.
-- If the video uses AI illustrations: it is labelled on screen and in the description. YouTube Studio
+- Every description draft and upload pack for a video with AI images or narration carries, verbatim, "Narration and
+  illustrations in this video are AI-generated. The script is researched from the sources listed below." followed by the
+  source list (`qa.py` fails without it).
+- If the video uses AI illustrations: it is labelled on screen (unless the creator set `ai_label: off`, in
+  which case say so and that the description carries the disclosure) and in the description. YouTube Studio
   also asks about "altered or synthetic content" when you upload - it is meant for realistic footage of
   real people, places or events. Stylised illustrations usually do not need it, but realistic-looking
-  scenes might; tell the creator it is their call and point them to YouTube's help page on it.
+  scenes might; tell the creator it is their call and point them to YouTube's help page on it. Remind them to answer
+  that question truthfully, especially when the on-screen label is off.
 - Stages that were `unavailable` or `skipped`, and what that means for this video.
 - Post-recording stages still to do (`state.py next <p> --post`).
 

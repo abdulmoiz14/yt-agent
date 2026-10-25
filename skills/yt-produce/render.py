@@ -17,8 +17,10 @@ crossfade into each other (--transition cut for hard cuts). --sfx adds a quiet w
 change of picture; --music lays a track under the voice and ducks it while the narrator speaks.
 
 AI images: any image whose licence starts with "AI illustration" (images.py writes that) makes render.py
-burn a small "AI illustration" label into the corner for the whole video. It cannot be switched off,
-only reworded with --label-text.
+burn a small "AI illustration" label into the corner for the whole video. Reword it with --label-text. It is
+off only when the creator has written `ai_label: off` (with the date and reason) in the project's brief.md or the
+channel notes - see settings.py - or passes --ai-label off; the setting is recorded in render.json and qa.py reports
+it. --ai-label on forces the label whatever the notes say. The description must still disclose the AI images.
 
 --clip A B [--intro-audio narration/short-1-intro.wav] [--hook-text "WORDS"] [--name short-1]
 cuts narration lines A..B (0-based; `render.py <p> --list-lines` prints them with times) out of the long video as a vertical Short
@@ -49,10 +51,19 @@ Outputs (project/render/):
 
 --pitch raises (>1) or lowers (<1) the voice without changing its speed (ffmpeg rubberband,
 or asetrate+atempo if rubberband is missing). 1.05-1.12 is a natural range.
+
+Optional enhanced look (all off by default; the plain render above is unchanged - see effects.py):
+    --enhanced | --opening | --animate-cards | --name-tags FILE | --timeline | --mixed-transitions | --texture
+    --emblem PNG --emblem-licence "where it is from, its licence"   (the opening's title sting)
+    [--hook-file hooks/chosen.txt] [--chapters seo/chapters-provisional.txt] [--claims factcheck/claims.json]
+    [--smooth-motion]   camera moves drawn at sub-pixel precision (no zoom stutter; needs Pillow); on with --enhanced
+    [--output render/NAME/NAME.mp4]       write the video there instead of render/[variant/]video.mp4
+Enhanced renders burn in no narration captions, keep the AI label (when it is on) on top of every effect, and write effects-log.md.
 """
 import json, os, re, shutil, subprocess, sys
 from pathlib import Path
 
+EFFECT_FLAGS = ("--enhanced", "--opening", "--animate-cards", "--name-tags", "--timeline", "--mixed-transitions", "--texture")
 FPS = 30
 MOTIONS = ("zoom_in", "zoom_out", "pan_left", "pan_right", "pan_up", "pan_down")
 MOTION_CYCLE = ("zoom_in", "pan_right", "zoom_out", "pan_left", "zoom_in", "pan_up", "zoom_out", "pan_down")
@@ -88,24 +99,40 @@ def build_segments(pdir, plan, lines, total):
     for i, e in enumerate(plan):
         t0 = 0.0 if i == 0 else lines[e["start_line"]]["start"]
         t1 = total if i == len(plan) - 1 else lines[plan[i + 1]["start_line"]]["start"]
-        ok = usable(e, pdir)
-        title = e.get("kind") == "title"
-        if title and not str(e.get("card") or "").strip(): die(f"plan.json entry {i}: a title card needs 'card' text")
-        if e.get("motion") and e["motion"] not in MOTIONS: die(f"plan.json entry {i}: motion must be one of {', '.join(MOTIONS)}")
-        segs.append({"index": i, "start": round(t0, 2), "end": round(t1, 2), "duration": round(max(t1 - t0, 0.5), 2),
-                     "kind": "title" if title else "image" if ok else "card", "image": e.get("image") if ok else None,
-                     "subtitle": e.get("subtitle") or "", "motion": e.get("motion") or MOTION_CYCLE[i % len(MOTION_CYCLE)],
-                     "card": e.get("card") or (Path(e["image"]).stem.replace("_", " ") if e.get("image") else "Visual to find"),
-                     "licence": e.get("licence") if ok else None, "source_url": e.get("source_url") if ok else None,
-                     "attribution": e.get("attribution") or "",
-                     "why_card": None if (ok or title) else ("no image" if not e.get("image") else
-                                                  "file missing" if not (pdir / e["image"]).is_file() else "licence not cleared")})
+        # an entry may carry "parts": it is then cut into consecutive shots (a picture with its own crop, or a map), each given
+        # a share of the entry's time by its "weight" (default 1); a part's own fields override the entry's
+        parts = e.get("parts") or [{}]
+        wsum = sum(float(p.get("weight", 1)) for p in parts); cur = t0
+        for j, part in enumerate(parts):
+            ee = {**e, **part}
+            end = t1 if j == len(parts) - 1 else cur + (t1 - t0) * float(part.get("weight", 1)) / wsum
+            ok = usable(ee, pdir)
+            title = ee.get("kind") == "title"
+            is_map = ee.get("kind") == "map"
+            if title and not str(ee.get("card") or "").strip(): die(f"plan.json entry {i}: a title card needs 'card' text")
+            if is_map and not isinstance(ee.get("map"), dict): die(f"plan.json entry {i}: a map shot needs a 'map' object (effects.py draws it)")
+            if ee.get("motion") and ee["motion"] not in MOTIONS: die(f"plan.json entry {i}: motion must be one of {', '.join(MOTIONS)}")
+            if ee.get("shot") is not None and not (isinstance(ee["shot"], dict) and set(ee["shot"]) == {"z0", "z1", "cx0", "cy0", "cx1", "cy1"}):
+                die(f"plan.json entry {i}: 'shot' needs exactly z0, z1, cx0, cy0, cx1, cy1")
+            n = len(segs)
+            segs.append({"index": n, "start": round(cur, 2), "end": round(end, 2), "duration": round(max(end - cur, 0.5), 2),
+                         "kind": "title" if title else "map" if is_map else "image" if ok else "card",
+                         "image": ee.get("image") if ok else None,
+                         "subtitle": ee.get("subtitle") or "", "motion": ee.get("motion") or MOTION_CYCLE[n % len(MOTION_CYCLE)],
+                         "card": ee.get("card") or (Path(ee["image"]).stem.replace("_", " ") if ee.get("image") else "Visual to find"),
+                         "licence": ee.get("licence") if ok else None, "source_url": ee.get("source_url") if ok else None,
+                         "attribution": ee.get("attribution") or "",
+                         "why_card": None if (ok or title or is_map) else ("no image" if not ee.get("image") else
+                                                      "file missing" if not (pdir / ee["image"]).is_file() else "licence not cleared"),
+                         **({"shot": ee["shot"], "part": j} if ee.get("shot") is not None and ok else {}),
+                         **({"map": ee["map"]} if is_map else {})})
+            cur = end
     return segs
 
 
 def srt_time(t):
-    h, rem = divmod(t, 3600); m, s = divmod(rem, 60)
-    return f"{int(h):02d}:{int(m):02d}:{int(s):02d},{int(round((s - int(s)) * 1000)):03d}"
+    ms = int(round(t * 1000)); h, ms = divmod(ms, 3600000); m, ms = divmod(ms, 60000); s, ms = divmod(ms, 1000)   # whole ms: never ",1000"
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
 def wrap(text, width=42):
@@ -261,6 +288,8 @@ def main():
         for k, ln in enumerate(lines): print(f"{k:4d}  {ln['start']:7.2f}-{ln['end']:7.2f}s  {ln['line'][:90]}")
         return
     segs = build_segments(pdir, plan, lines, total)
+    if any(s["kind"] == "map" for s in segs) and not any(f in a for f in EFFECT_FLAGS):
+        die("map shots are drawn by effects.py: pass an enhanced flag (for example --animate-cards or --enhanced)")
     cap_lines, clip_info, intro = lines, None, None
     if clip:
         ca, cb = clip
@@ -279,7 +308,13 @@ def main():
     cards = [s for s in segs if s["kind"] == "card"]
     titles = [s for s in segs if s["kind"] == "title"]
     ai = any(str(s.get("licence") or "").lower().startswith("ai illustration") for s in segs if s["kind"] == "image")
-    label = (opt("--label-text") or "AI illustration") if ai else None
+    sys.path.insert(0, str(Path(__file__).resolve().parent)); import settings
+    ai_set, ai_src, ai_note = settings.ai_label(pdir)
+    if opt("--ai-label"):
+        if opt("--ai-label") not in ("on", "off"): die("--ai-label must be on or off")
+        ai_set, ai_src, ai_note = opt("--ai-label"), "--ai-label flag", ""
+    label_off = bool(ai) and ai_set == "off"
+    label = (opt("--label-text") or "AI illustration") if ai and not label_off else None
     transition = opt("--transition", "fade")
     if transition not in ("fade", "cut"): die("--transition must be fade or cut")
     durs = [s["duration"] for s in segs]
@@ -296,21 +331,57 @@ def main():
         if not music_licence or len(music_licence.strip()) < 4:
             die("--music needs --music-licence saying where the track is from and its licence (it goes in credits.txt)")
 
+    fxo, fxlog, fxinfo, bounds, chapters, tags, fxnotes = None, [], {}, None, [], [], []
+    smooth = "--smooth-motion" in a or "--enhanced" in a
+    if smooth:
+        if clip: die("--smooth-motion is for the long video; --clip Shorts keep the plain render")
+        sys.path.insert(0, str(Path(__file__).resolve().parent)); import effects
+        try: effects.need_pillow()
+        except effects.FxError as e: die(str(e))
+    if any(f in a for f in EFFECT_FLAGS):
+        if clip: die("the enhanced effects are for the long video; --clip Shorts keep the plain render")
+        if not fade: die("the enhanced effects need crossfades (do not use --transition cut)")
+        sys.path.insert(0, str(Path(__file__).resolve().parent)); import effects
+        try:
+            fxo = effects.parse_flags(a, pdir, opt); effects.need_pillow()
+            hook = fxo["hook_file"].read_text().strip() if fxo["opening"] and fxo["hook_file"].exists() else None
+            chapters = effects.parse_chapters(fxo["chapters_file"].read_text()) if fxo["chapters_file"].exists() and (fxo["timeline"] or fxo["mixed"]) else []
+            chapters = [c for c in chapters if c["t"] < total - 1]
+            segs, bounds, fxlog, fxinfo = effects.plan(fxo, segs, lines, total, fade, hook, chapters)
+            if fxo["tags"]:
+                tg, problems = effects.load_name_tags((pdir / fxo["tags"]) if not Path(fxo["tags"]).is_absolute() else Path(fxo["tags"]),
+                                                      fxo["claims_file"], lines)
+                for pr in problems: print(f"warning: name tag skipped: {pr}", file=sys.stderr); fxnotes.append(f"name tag skipped: {pr}")
+                tags = effects.schedule_tags(tg, segs)
+            effects.describe(fxo, segs, bounds, chapters, tags, total, fxlog)
+        except effects.FxError as e: die(str(e))
+        cards = [s for s in segs if s["kind"] == "card"]; titles = [s for s in segs if s["kind"] == "title"]
+
     if "--dry-run" in a:
         for s in segs:
-            if s["kind"] == "image": what = s["image"] + f"  [{s['licence']}]  {s['motion']}"
+            if s["kind"] == "sting": what = "TITLE STING \"PAST IN MINUTES\""
+            elif s["kind"] == "image": what = s["image"] + f"  [{s['licence']}]  " + ("punch-in crop" if s.get("shot") else s["motion"])
+            elif s["kind"] == "map": what = "MAP SHOT " + str(s["map"].get("caption") or "")
             elif s["kind"] == "title": what = f"TITLE \"{s['card']}\"" + (f" / {s['subtitle']}" if s['subtitle'] else "")
             else: what = f"CARD \"{s['card']}\" ({s['why_card']})"
             print(f"{s['start']:7.2f}-{s['end']:7.2f}s  {what}")
         print(f"\n{len(segs)} segments, {len(cards)} placeholder card(s), {len(titles)} title card(s), {total:.1f} s, {W}x{H}"
               + (f", clip of lines {clip[0]}-{clip[1]}" if clip else "")
-              + (f", {fade:.2f}s crossfades" if fade else ", hard cuts") + (f", label '{label}'" if label else "")
+              + (f", {fade:.2f}s crossfades" if fade else ", hard cuts") + (f", label '{label}'" if label else (f", label OFF ({ai_src}: {ai_note or 'ai_label: off'})" if label_off else ""))
               + (f", {sfx} on changes" if sfx != "none" else "") + (f", music {music.name}" if music else ""))
+        if fxo:
+            print("\nenhanced effects:")
+            for r in sorted(fxlog, key=lambda r: (r[0], r[2])): print(f"{effects.clock(r[0])}-{effects.clock(r[1])}  {r[2]}: {r[3]}")
         return
 
     if not shutil.which("ffmpeg"): die("ffmpeg is not installed", 3)
     if clip: out_dir = pdir / "render" / "shorts" / (name_opt or f"lines-{clip[0]}-{clip[1]}")
     else: out_dir = pdir / "render" / var if var else pdir / "render"
+    out_name = None
+    if opt("--output"):
+        o = Path(opt("--output")); o = o if o.is_absolute() else pdir / o
+        if o.suffix != ".mp4": die("--output must be an .mp4 path")
+        out_dir, out_name = o.parent, o.name
     work = out_dir / "work"
     work.mkdir(parents=True, exist_ok=True)
     hook_text = opt("--hook-text")
@@ -322,12 +393,24 @@ def main():
         if r.returncode: die(f"{what} failed: {r.stderr.strip()[:400]}", 1)
     seg_files, lengths = [], []
     for k, s in enumerate(segs):
+        if fxo:                                               # enhanced: clip lengths come from each boundary's own transition
+            try: out = effects.seg_clip(s, pdir, work, W, H, run, smooth)
+            except effects.FxError as e: die(str(e), 1)
+            if out is None:
+                out, cmd = seg_cmd(s, pdir, work, W, H, fontfile, s["length"]); run(cmd, f"segment {s['index']}")
+            seg_files.append(out); lengths.append(s["length"]); continue
         # each picture change is centred on its narration line: the fade runs from half a fade before to half after
         length = s["duration"] + (0.0 if not fade else fade / 2 if k in (0, len(segs) - 1) else fade)
         out, cmd = seg_cmd(s, pdir, work, W, H, fontfile, length)
-        run(cmd, f"segment {s['index']}")
+        if smooth and s["kind"] == "image":
+            try: effects.smooth_clip(s, pdir, out, W, H, max(int(round(length * FPS)), 1), run)
+            except effects.FxError as e: die(str(e), 1)
+        else: run(cmd, f"segment {s['index']}")
         seg_files.append(out); lengths.append(length)
-    if fade:
+    if fxo:
+        joined = effects.join(seg_files, segs, bounds, work, run)
+        video_in = ["-i", str(joined)]
+    elif fade:
         joined = crossfade(seg_files, lengths, fade, work, run)
         video_in = ["-i", str(joined)]
     else:
@@ -346,12 +429,14 @@ def main():
         else:
             run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(vo), "-af", trim, str(audio)], "audio cut")
 
-    name = "video.mp4" if not cards else "draft.mp4"
-    filters = [] if "--no-captions" in a else [
+    name = out_name or ("video.mp4" if not cards else "draft.mp4")
+    burn = "--no-captions" not in a and not fxo
+    filters = [] if not burn else [
         # libass sizes against a 288-line grid: vertical needs a smaller number, and captions sit
         # above the bottom fifth, which the Shorts player covers with its buttons and title
         f"subtitles=../captions.srt:force_style='FontName=DejaVu Sans,FontSize={11 if H > W else 20},"
         f"Outline=2,Shadow=0,MarginV={62 if H > W else 40}'"]
+    label_geo = None
     if hook_text:                                     # /yt-shorts: on-screen words for the first two seconds
         tf = work / "hook.txt"; tf.write_text("\n".join(wrap(hook_text, 18)))
         size = int(W / 11)
@@ -360,6 +445,8 @@ def main():
     if label:                                         # AI images: a permanent, honest corner label
         lf = work / "label.txt"; lf.write_text(label)
         lsize = max(int(H / (54 if H > W else 40)), 14)
+        label_geo = {"text": label, "fontfile": fontfile, "fontsize": lsize, "boxborderw": lsize // 3, "x": "w*0.025",
+                     "y": "h*0.12" if H > W else "h*0.04", "size": f"{W}x{H}"}
         filters.append(f"drawtext=fontfile='{fontfile}':textfile='{lf}':fontcolor=white@0.85:fontsize={lsize}:"
                        f"box=1:boxcolor=black@0.35:boxborderw={lsize // 3}:x=w*0.025:y={'h*0.12' if H > W else 'h*0.04'}")
 
@@ -369,7 +456,9 @@ def main():
     inputs = video_in + ["-i", str(audio)]
     graph = [f"[1:a]{af + ',' if af else ''}aresample=48000,aformat=channel_layouts=mono[vo]"]
     mix, n_in = ["[vo1]"], 2
-    changes = [round(s["start"] - fade / 2, 3) for s in segs[1:]]
+    changes = [(round(s["start"] - fade / 2, 3), sfx) for s in segs[1:]] if sfx != "none" else []
+    if fxo and opt("--sfx") in (None, "whoosh"):          # enhanced: whooshes on flashes and date/chapter cards, a click on about every third change
+        changes = [(t, kind) for t, kind, _ in effects.sfx_events(segs, bounds)]; sfx = "whoosh+click"
     if music:
         inputs += ["-stream_loop", "-1", "-i", str(music)]
         graph[0] = graph[0].replace("[vo]", "[vo0]") + ";[vo0]asplit=2[vo1][vosc]"
@@ -380,34 +469,54 @@ def main():
     else:
         graph[0] = graph[0].replace("[vo]", "[vo1]")
     if sfx != "none" and changes:
-        inputs += ["-i", str(sfx_file(sfx, work, run))]
-        graph.append(f"[{n_in}:a]asplit={len(changes)}" + "".join(f"[s{i}]" for i in range(len(changes))) if len(changes) > 1
-                     else f"[{n_in}:a]anull[s0]")
-        for i, t in enumerate(changes):
-            ms = max(int((t - (0.25 if sfx == "whoosh" else 0)) * 1000), 0)
-            graph.append(f"[s{i}]adelay={ms}|{ms}[d{i}]")
+        kinds = sorted({k for _, k in changes}); src = {}
+        for kd in kinds:
+            idx = [i for i, (_, k) in enumerate(changes) if k == kd]
+            inputs += ["-i", str(sfx_file(kd, work, run))]; n = n_in; n_in += 1
+            graph.append(f"[{n}:a]asplit={len(idx)}" + "".join(f"[{kd[0]}{i}]" for i in idx) if len(idx) > 1 else f"[{n}:a]anull[{kd[0]}{idx[0]}]")
+        for i, (t, kd) in enumerate(changes):
+            ms = max(int((t - (0.25 if kd == "whoosh" else 0)) * 1000), 0)
+            graph.append(f"[{kd[0]}{i}]adelay={ms}|{ms}[d{i}]")
         graph.append("".join(f"[d{i}]" for i in range(len(changes))) + f"amix=inputs={len(changes)}:normalize=0[sfx]")
-        mix.append("[sfx]"); n_in += 1
+        mix.append("[sfx]"); n_in += 0
     graph.append("".join(mix) + f"amix=inputs={len(mix)}:duration=first:normalize=0[a]" if len(mix) > 1 else f"{mix[0]}anull[a]")
-    vmap = "0:v"
-    if filters:
-        graph.append("[0:v]" + ",".join(filters) + "[v]"); vmap = "[v]"
+    if fxo:                                           # the whoosh must not push the narration past its true-peak ceiling
+        graph[-1] = graph[-1].replace("[a]", "[a0]"); graph.append("[a0]alimiter=limit=0.80:level=false[a]")
+    vmap, vin = "0:v", "[0:v]"
+    if fxo:
+        pieces, vin, n_in = effects.final_graph(fxo, W, H, total, bounds, segs, chapters, tags, work, inputs, n_in)
+        graph += pieces
+        if vin != "[0:v]": vmap = vin
+    if filters:                                       # the AI label, when on, is always the last filter: nothing drawn above can cover it
+        graph.append(vin + ",".join(filters) + "[v]"); vmap = "[v]"
     run(["ffmpeg", "-y", "-loglevel", "error"] + inputs + ["-filter_complex", ";".join(graph), "-map", vmap, "-map", "[a]",
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
          "-t", f"{total:.3f}", "-movflags", "+faststart", str(out_dir / name)], "final mux", cwd=work)
     other = out_dir / ("draft.mp4" if name == "video.mp4" else "video.mp4")
-    if other.exists(): other.unlink()                     # never leave a stale "final" next to a new draft
+    if other.exists() and not out_name: other.unlink()                     # never leave a stale "final" next to a new draft
 
     credits = sorted({f"{s['card']}: {s['attribution'] or s['licence']} - {s['source_url']}" for s in segs
                       if s["kind"] == "image" and (s["attribution"] or s["source_url"])})
-    if ai: credits.append(f"Illustrations: {label} - AI-generated for this video, not historical images.")
+    if ai: credits.append(f"Illustrations: {label or 'AI illustration'} - AI-generated for this video, not historical images.")
     if music: credits.append(f"Music: {music.name} - {music_licence.strip()}")
     (out_dir / "credits.txt").write_text("\n".join(credits) + ("\n" if credits else ""))
     report = {"output": str((out_dir / name).relative_to(pdir)), "variant": var, "clip": clip_info, "draft": bool(cards),
               "size": f"{W}x{H}", "pitch": pitch, "duration_sec": total, "placeholders": len(cards), "titles": len(titles),
               "transition": "fade" if fade else "cut", "fade_sec": fade, "label": label, "sfx": sfx,
               "music": {"file": music.name, "licence": music_licence.strip(), "volume": music_vol} if music else None,
+              "burned_captions": burn, "smooth_motion": smooth,
+              "ai_label": {"setting": ai_set, "source": ai_src, "note": ai_note, "ai_images": bool(ai), "shown": bool(label)}, "label_geometry": label_geo if label else None,
               "segments": segs, "commands": cmds}
+    if fxo:
+        assets = [f"AI scene images and title cards: as listed in segments (licence recorded per image)", "fonts: DejaVu Sans / Serif (system fonts, free licence)"]
+        mp = [s for s in segs if s["kind"] == "map"]
+        if mp: assets.append(f"base map: Natural Earth 1:50m land ({mp[0]['map']['land']}); public domain per https://www.naturalearthdata.com/about/terms-of-use/ ; routes drawn by effects.py and simplified")
+        if fxo["opening"]: assets.append(f"channel emblem {fxo['emblem']} (sha256 {effects.sha(fxo['emblem'])}): {fxo['emblem_licence'].strip()}")
+        report["enhanced"] = {"flags": {k: bool(v) for k, v in fxo.items() if k in ("opening", "cards", "tags", "timeline", "mixed", "texture")},
+                              "strong_transitions": fxinfo.get("strong", []), "sting": fxinfo.get("sting"), "flash": fxinfo.get("flash"),
+                              "emblem": {"file": str(fxo["emblem"]), "licence": fxo["emblem_licence"].strip()} if fxo["opening"] else None,
+                              "name_tags": [{k: t[k] for k in ("name", "fact", "claims", "at", "end")} for t in tags],
+                              "label_on_top": bool(label), "effects": effects.write_log(out_dir / "effects-log.md", fxlog, fxinfo, assets, fxnotes)}
     (out_dir / "render.json").write_text(json.dumps(report, indent=1, ensure_ascii=False) + "\n")
     shutil.rmtree(work, ignore_errors=True)
     print(f"wrote {out_dir / name} ({total:.0f} s, {W}x{H})" +

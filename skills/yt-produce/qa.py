@@ -15,6 +15,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import state  # noqa: E402
 import quotecheck  # noqa: E402
+import settings  # noqa: E402
 
 WPM = 150
 TIERS = {"primary", "scholarly", "secondary", "weak"}
@@ -235,6 +236,20 @@ def run_tool(path, args):
     except json.JSONDecodeError: return None, f"{path.name} did not return JSON"
 
 
+def render_reports(pdir):
+    """Every render.json that belongs to a current render. Anything under a folder named _old was archived by the creator and is not checked."""
+    return sorted(p for p in pdir.glob("render/**/render.json") if "_old" not in p.relative_to(pdir).parts)
+
+
+def stream_seconds(path, kind):
+    """Length of the first video ('v') or audio ('a') stream, or None when ffprobe is missing or cannot say."""
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", kind, "-show_entries", "stream=duration", "-of", "csv=p=0", str(path)],
+                           capture_output=True, text=True)
+        return float(r.stdout.split()[0])
+    except (OSError, ValueError, IndexError): return None
+
+
 def full_run(pdir):
     pdir = Path(pdir); data = state.load(pdir); R = []
     add = lambda lvl, check, msg: R.append((lvl, check, msg))
@@ -331,12 +346,16 @@ def full_run(pdir):
             add("PASS", "voiceover", f"{meta.get('duration_sec')} s, voice {meta.get('voice')}, {meta.get('engine')} - listen to every name before publishing")
         else:
             add("WARN", "voiceover", "voiceover.wav has no voiceover.json - was it made by tts.py?")
-    for rj in sorted(pdir.glob("render/**/render.json")):
+    for rj in render_reports(pdir):
         rep, _ = read_json(rj); label = f"render {rj.parent.relative_to(pdir)}"
         if not isinstance(rep, dict): add("WARN", label, "render.json unreadable"); continue
         bad = [s["index"] for s in rep.get("segments", []) if s.get("kind") == "image" and not s.get("licence")]
         src_vo = pdir / "narration" / (f"{rep['variant']}-voiceover.wav" if rep.get("variant") else "voiceover.wav")
+        vid = pdir / rep["output"] if rep.get("output") else None
+        vlen, alen = (stream_seconds(vid, "v"), stream_seconds(vid, "a")) if vid and vid.is_file() else (None, None)
         if bad: add("FAIL", label, f"segments {bad} use an image with no recorded licence")
+        elif vlen is not None and alen is not None and alen - vlen > 1.0:
+            add("FAIL", label, f"{rep['output']}: the picture ends at {vlen:.1f} s but the sound runs to {alen:.1f} s - the video is cut short, re-render")
         elif src_vo.exists() and src_vo.stat().st_mtime > rj.stat().st_mtime + 1:
             add("WARN", label, "the voiceover changed after this render - re-render")
         elif rep.get("draft"):
@@ -344,24 +363,33 @@ def full_run(pdir):
         else:
             add("PASS", label, f"{rep['output']}, every image has a recorded licence - watch it through before upload")
     ai_renders = []
-    for rj in sorted(pdir.glob("render/**/render.json")):
+    ai_set, ai_src, ai_note = settings.ai_label(pdir)
+    for rj in render_reports(pdir):
         rep, _ = read_json(rj)
         if isinstance(rep, dict) and any(str(s.get("licence") or "").lower().startswith("ai illustration")
                                          for s in rep.get("segments", []) if s.get("kind") == "image"):
             ai_renders.append(rj)
             if not rep.get("label"):
-                add("FAIL", "AI disclosure", f"{rj.parent.relative_to(pdir)} uses AI images but has no on-screen label - re-render with this render.py")
+                if ai_set == "off":
+                    add("PASS", "AI label", f"{rj.parent.relative_to(pdir)}: label off by creator decision ({ai_src}: {ai_note or 'ai_label: off'}) - "
+                        "the disclosure is in the channel text and each description; answer YouTube's altered or synthetic content question truthfully")
+                else:
+                    add("FAIL", "AI disclosure", f"{rj.parent.relative_to(pdir)} uses AI images but has no on-screen label - re-render with this render.py "
+                        "(or, if the creator decided against the label, write `ai_label: off` with the date and reason in brief.md)")
     rv, _ = read_json(pdir / "visuals/review.json")
     if isinstance(rv, dict):
         redo = [str(r.get("scene")) for r in rv.get("scenes", []) if isinstance(r, dict) and r.get("verdict") == "redo"]
         if redo: add("WARN", "image review", f"scenes marked redo by yt-image-reviewer: {', '.join(redo)} - regenerate or confirm with the creator")
     if ai_renders:
-        desc = pdir / "seo/description.md"
-        if desc.exists() and re.search(r"\bAI[- ]generated\b", desc.read_text(errors="replace"), re.I):
-            add("PASS", "AI disclosure", "on-screen label and a description line saying the illustrations are AI-generated")
+        docs = [pdir / "seo/description.md"] + [x for x in (pdir / "publish/upload-pack.md",) if x.exists()]
+        probs = [f"{d.relative_to(pdir)}: {settings.disclosure_problem(d.read_text(errors='replace')) if d.exists() else 'not written yet'}"
+                 for d in docs if not d.exists() or settings.disclosure_problem(d.read_text(errors="replace"))]
+        if not probs:
+            add("PASS", "AI disclosure", ("on-screen label and " if not ai_set == "off" else "") + "the description draft"
+                + (" and upload pack" if len(docs) > 1 else "") + " carry the AI-disclosure line followed by the sources")
         else:
-            add("FAIL", "AI disclosure", "the video uses AI illustrations - seo/description.md must say so "
-                "(e.g. 'Illustrations in this video are AI-generated and are not historical images.')")
+            add("FAIL", "AI disclosure", "the video uses AI illustrations - every description draft and upload pack must contain the line "
+                f"'{settings.DISCLOSURE}' followed by the sources. " + "; ".join(probs))
     srcs, _ = read_json(pdir / "research/sources.json")
     if isinstance(srcs, list) and srcs:
         weakq = [f"{s.get('id')} ({s.get('quote_check')})" for s in srcs if s.get("quote_check") != "raw_text_match"]

@@ -13,7 +13,7 @@ decide whether a thread becomes a conversation other people read.
 
 ## Before you write
 
-1. Read `~/.claude/youtube/voice.md` if it exists. That is the user's voice profile: how they talk
+1. Read `$YT_VOICE_FILE` if it is set, otherwise `~/.claude/youtube/voice.md`, if it exists. That is the user's voice profile: how they talk
    on camera, the words they never use, who they are talking to, what they will not claim. If it
    does not exist, ask for **three of their own videos**, read or transcribe them, infer the voice,
    and write the file. A script in the wrong voice is worse than no script, because they have to

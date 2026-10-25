@@ -17,6 +17,8 @@ python3 images.py init <project> --style natural          # natural | comic | ro
 python3 images.py check <project>                         # every prompt as it will be sent + the estimate
 python3 images.py generate <project> --limit 3 --max-spend 0.03
 python3 images.py generate <project> --max-images 120 --max-spend 1.20
+python3 images.py review-todo <project>                  # scenes the review still has to look at (new, not hashed, changed)
+python3 images.py review-stamp <project> --scenes 1-6     # after a review run: store the hash of the scenes it finished
 python3 images.py approve <project> --scenes all --statement "<the creator's words>"
 python3 images.py plan <project>                          # visuals/plan.json for ../yt-produce/render.py
 python3 images.py thumb <project> --text "ROME FELL" --from-scene 4
@@ -58,8 +60,12 @@ After the voiceover exists, list its lines: `python3 ../yt-produce/render.py <pr
    this look, or change it? Change the style or prompts, regenerate only what they name (`--scenes 2`).
 3. `generate` the rest with `--max-images` set to the scene count. Failed scenes: show the error, and run
    `retry` only if they agree.
-4. yt-image-reviewer on everything new. Scenes marked `redo`: fix the prompt and regenerate (a new
-   version is made; the old file is kept), within the spending limit.
+4. yt-image-reviewer on everything new. Run `review-todo` to list the scenes that need review (new, not
+   hashed, or changed). Give the reviewer at most 6 per run, each run in a fresh session, and repeat until none
+   are left. After each run, `review-stamp --scenes N-M` for exactly the scenes it finished. Scenes marked
+   `redo`: fix the prompt and regenerate (a new version is made; the old file is kept), within the spending limit.
+   The review says "look here", it is not approval: the creator checks close-ups with hands in the foreground
+   themselves, on a contact sheet of the flagged images.
 5. The creator approves - their own words, recorded with `approve --statement`. Unapproved scenes become cards.
 6. `plan` writes `visuals/plan.json` for render.py.
 
